@@ -1,0 +1,25 @@
+# Perfetto 模板：网络 / 吞吐（network）
+duration_ms: 0
+buffers {
+  size_kb: 65536
+  fill_policy: RING_BUFFER
+}
+data_sources {
+  config {
+    name: "linux.ftrace"
+    target_buffer: 0
+    ftrace_config {
+      ftrace_events: "net/net_dev_xmit"
+      ftrace_events: "net/net_dev_receive"
+      atrace_categories: "net"
+      atrace_categories: "wifi"
+      atrace_apps: "*"
+    }
+  }
+}
+data_sources {
+  config {
+    name: "linux.process_stats"
+    target_buffer: 0
+  }
+}

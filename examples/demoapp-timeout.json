@@ -1,0 +1,14 @@
+{
+  "schema_version": 2,
+  "name": "demoapp-timeout",
+  "description": "Synthetic DemoApp timeout evidence",
+  "source": {"type": "file", "path": "examples/demoapp.log"},
+  "parse": {"segmenter": "devicelog"},
+  "filter": {"grep": "task.started|request.failed", "tag": "demoapp-timeout"},
+  "assert": {
+    "rules": [
+      {"name": "has-task", "type": "contains", "match": "task.started"},
+      {"name": "has-failure", "type": "contains", "match": "request.failed"}
+    ]
+  }
+}

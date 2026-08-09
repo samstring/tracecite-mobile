@@ -1,0 +1,72 @@
+# OS, editor, and local graph data
+.DS_Store
+.code-review-graph/
+.device-debug/
+.workbuddy/
+
+# Local environment and signing credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.mobileprovision
+
+# Python environments, caches, coverage, and build outputs
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Crash reports, Apple build bundles, and local databases
+*.ips
+*.crash
+*.xcresult
+*.xcarchive
+*.dSYM/
+*.sqlite
+*.db
+
+# Project-local configuration and immutable analysis runs
+/.tracecite/
+.filtered/
+
+# Device/session state and their advisory locks
+.tracecite-session.json
+.tracecite-session.json.lock
+.tracecite-sessions.json
+.tracecite-sessions.json.lock
+.tracecite-capture.json
+.tracecite-capture.json.lock
+
+# Filter evidence sidecars
+*.records.jsonl
+*.hits.jsonl
+*.templates.jsonl
+*.events.jsonl
+filter_history.jsonl
+filter_history.jsonl.lock
+
+# Raw logs, device captures, trace exports, and analysis archives
+*.log
+!examples/demoapp.log
+*.trace
+*.trace.zip
+*_toc.xml
+*_hangs.xml
+*_hang_risks.xml
+export_*.zip

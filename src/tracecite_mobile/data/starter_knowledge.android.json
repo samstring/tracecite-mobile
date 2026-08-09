@@ -1,0 +1,95 @@
+{
+  "version": 1,
+  "knowledge_schema_version": 3,
+  "source": "[platform:android] Android framework, ART, and Linux system signals",
+  "filter_terms": {
+    "android-anr": [
+      "ANR",
+      "am_anr",
+      "Input dispatching timed out",
+      "Broadcast of Intent",
+      "executing service"
+    ],
+    "android-crash": [
+      "FATAL EXCEPTION",
+      "AndroidRuntime",
+      "Native crash",
+      "tombstone",
+      "Fatal signal"
+    ],
+    "android-startup": [
+      "ActivityThread",
+      "handleBindApplication",
+      "ActivityTaskManager",
+      "Displayed"
+    ],
+    "android-memory": [
+      "OutOfMemoryError",
+      "Low on memory",
+      "onTrimMemory",
+      "onLowMemory",
+      "Background concurrent copying GC"
+    ],
+    "android-frame": [
+      "Choreographer",
+      "Skipped",
+      "FrameTimeline",
+      "Jank"
+    ],
+    "android-network": [
+      "ConnectivityService",
+      "NetworkMonitor",
+      "DnsResolver",
+      "NetworkCapabilities",
+      "UnknownHostException",
+      "SocketTimeoutException"
+    ],
+    "android-system": [
+      "ActivityManager",
+      "ActivityTaskManager",
+      "WindowManager",
+      "PowerManager"
+    ],
+    "android-custom": []
+  },
+  "markers": [
+    {"needle": "ANR", "category": "android.anr", "label": "ANR"},
+    {"needle": "FATAL EXCEPTION", "category": "android.crash", "label": "Fatal exception"},
+    {"needle": "OutOfMemoryError", "category": "android.memory", "label": "Out of memory"},
+    {"needle": "Background concurrent copying GC", "category": "android.memory", "label": "ART concurrent GC"},
+    {"needle": "Skipped", "category": "android.frame", "label": "Skipped frames"},
+    {"needle": "Displayed", "category": "android.startup", "label": "Activity displayed"},
+    {"needle": "ConnectivityService", "category": "android.network", "label": "Connectivity service"}
+  ],
+  "events": {
+    "android.anr": {"category": "android.anr", "name": "android.anr", "label": "ANR"},
+    "android.crash": {"category": "android.crash", "name": "android.crash", "label": "Crash"},
+    "android.memory": {"category": "android.memory", "name": "android.memory", "label": "Memory"},
+    "android.frame": {"category": "android.frame", "name": "android.frame", "label": "Frames"},
+    "android.startup": {"category": "android.startup", "name": "android.startup", "label": "Startup"},
+    "android.network": {"category": "android.network", "name": "android.network", "label": "Connectivity"}
+  },
+  "behaviors": [],
+  "learnings": [
+    {
+      "at": "",
+      "summary": "The public Android starter contains only Android framework, ART, and Linux signals. SDK analytics and application protocols belong in project knowledge or an upper-layer plugin.",
+      "tags": ["android", "system"],
+      "evidence": "adb logcat -v threadtime"
+    }
+  ],
+  "playbooks": [
+    {
+      "name": "android-system-evidence",
+      "when": "Collect bounded Android framework evidence",
+      "steps": [
+        "filter --preset android-system --snapshot --last 5m",
+        "use android-anr, android-crash, android-memory, or android-frame for the observed fault",
+        "add application operation markers through project knowledge"
+      ],
+      "tags": ["android", "system"],
+      "related_presets": ["android-system", "android-anr", "android-crash"]
+    }
+  ],
+  "scenarios": {}
+}

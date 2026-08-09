@@ -1,0 +1,91 @@
+{
+  "version": 1,
+  "knowledge_schema_version": 3,
+  "updated_at": "",
+  "source": "[platform:ios] Apple platform lifecycle, memory-pressure, and process-fault signals",
+  "filter_terms": {
+    "system-lifecycle": [
+      "UIApplicationDidBecomeActiveNotification",
+      "UIApplicationWillResignActiveNotification",
+      "UIApplicationDidEnterBackgroundNotification",
+      "UIApplicationWillEnterForegroundNotification"
+    ],
+    "system-memory": [
+      "UIApplicationDidReceiveMemoryWarningNotification",
+      "JetsamEvent",
+      "memorystatus"
+    ],
+    "system-fault": [
+      "EXC_CRASH",
+      "watchdog termination",
+      "JetsamEvent"
+    ]
+  },
+  "markers": [
+    {
+      "needle": "UIApplicationDidBecomeActiveNotification",
+      "category": "ios.lifecycle",
+      "label": "Application became active"
+    },
+    {
+      "needle": "UIApplicationDidEnterBackgroundNotification",
+      "category": "ios.lifecycle",
+      "label": "Application entered background"
+    },
+    {
+      "needle": "UIApplicationDidReceiveMemoryWarningNotification",
+      "category": "ios.memory-pressure",
+      "label": "Application received memory warning"
+    },
+    {
+      "needle": "JetsamEvent",
+      "category": "ios.process-fault",
+      "label": "Jetsam event"
+    },
+    {
+      "needle": "watchdog termination",
+      "category": "ios.process-fault",
+      "label": "Watchdog termination"
+    }
+  ],
+  "events": {
+    "ios.lifecycle": {
+      "category": "ios.lifecycle",
+      "name": "ios.lifecycle",
+      "label": "Application lifecycle"
+    },
+    "ios.memory-pressure": {
+      "category": "ios.memory-pressure",
+      "name": "ios.memory-pressure",
+      "label": "Memory pressure"
+    },
+    "ios.process-fault": {
+      "category": "ios.process-fault",
+      "name": "ios.process-fault",
+      "label": "Process fault"
+    }
+  },
+  "behaviors": [],
+  "learnings": [
+    {
+      "at": "",
+      "summary": "The public starter contains only Apple platform signals. Application actions and network protocols belong in project knowledge or an upper-layer plugin.",
+      "tags": ["ios", "system"],
+      "evidence": "Apple platform notifications and process diagnostics"
+    }
+  ],
+  "playbooks": [
+    {
+      "name": "ios-system-evidence",
+      "when": "Correlate lifecycle, memory pressure, or process termination with a bounded log window",
+      "steps": [
+        "filter --preset system-lifecycle --snapshot --last 5m",
+        "filter --preset system-memory --snapshot --last 5m when memory pressure is suspected",
+        "add project markers through project knowledge when operation context is required"
+      ],
+      "tags": ["ios", "system"],
+      "related_presets": ["system-lifecycle", "system-memory", "system-fault"]
+    }
+  ],
+  "scenarios": {}
+}
