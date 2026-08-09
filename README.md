@@ -30,7 +30,12 @@ Four things that make mobile debugging harder than it should be:
 ## Install
 
 ```bash
-pip install tracecite-mobile
+# Install tracecite-core first: https://github.com/xxx/tracecite-core
+git clone https://github.com/xxx/tracecite-core
+pip install -e ./tracecite-core
+
+# Then install Mobile
+pip install -e .
 tracecite-mobile profile init
 ```
 

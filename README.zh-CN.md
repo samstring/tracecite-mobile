@@ -30,7 +30,12 @@
 ## 安装
 
 ```bash
-pip install tracecite-mobile
+# 先装 tracecite-core：https://github.com/xxx/tracecite-core
+git clone https://github.com/xxx/tracecite-core
+pip install -e ./tracecite-core
+
+# 再装 Mobile
+pip install -e .
 tracecite-mobile profile init
 ```
 
