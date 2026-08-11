@@ -16,6 +16,7 @@ from pathlib import Path
 from tracecite_core import (
     AnalysisEvent,
     ArchiveSource,
+    SourceError,
     build_segmenter,
 )
 from tracecite_mobile.plugins.segmenters import detect_segmenter_kind
@@ -274,10 +275,11 @@ class ArchiveDetectionTest(_TmpDirTest):
             zf.writestr("../escaped.txt", "must not escape")
             zf.writestr("safe/inside.txt", APPLOG_SAMPLE)
 
-        members = ArchiveSource(path, extract_dir=extract).extract()
+        with self.assertRaisesRegex(SourceError, "不安全成员"):
+            ArchiveSource(path, extract_dir=extract).extract()
 
-        self.assertEqual([item.name for item in members], ["inside.txt"])
         self.assertFalse((self.tmp / "escaped.txt").exists())
+        self.assertFalse((extract / "safe" / "inside.txt").exists())
 
 
 if __name__ == "__main__":  # pragma: no cover

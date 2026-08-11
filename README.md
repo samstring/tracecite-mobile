@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Let agents analyze phone logs directly — built on TraceCite Core.</strong>
+  <strong>The official Mobile domain extension for TraceCite.</strong>
 </p>
 
 <p align="center">
@@ -30,12 +30,9 @@ Four things that make mobile debugging harder than it should be:
 ## Install
 
 ```bash
-# Install tracecite-core first: https://github.com/xxx/tracecite-core
-git clone https://github.com/xxx/tracecite-core
-pip install -e ./tracecite-core
-
-# Then install Mobile
-pip install -e .
+# Install the main TraceCite distribution, then the Mobile extension
+pip install tracecite
+pip install tracecite-mobile
 tracecite-mobile profile init
 ```
 
@@ -82,12 +79,30 @@ tracecite-mobile filter app.log --preset memory-leak --json
 | Data types | Text logs only | Logs + performance traces; one command records both |
 | Output format | Raw text; AI parses on its own | Structured JSON + user behavior events |
 | User actions | AI infers from log strings | Auto-lifted into structured behavior events |
-| Knowledge reuse | None | Local knowledge base improves with each use |
+| Knowledge reuse | None | Auditable project-local presets and candidate terms |
 | Reproducibility | Different steps across runs | Full run manifest records all parameters, input frozen |
 
 ## Architecture
 
-Core provides the text analysis engine. Mobile adds four layers on top:
+The main TraceCite distribution provides Core evidence primitives, the generic
+Runtime, and the versioned Extension API. Mobile stays independent and
+registers its device adapters and domain semantics through
+`tracecite.extensions`:
+
+```text
+External Agent
+      |
+TraceCite Runtime ---- tracecite-mobile
+      |
+TraceCite Core
+```
+
+Importing either `tracecite` or `tracecite_mobile` does not register Mobile
+formats or mutate the Core registry. Use
+`tracecite extension load` or `tracecite run ... --load-extensions --runtime mobile`
+when the main Runtime should discover the installed Mobile extension.
+The standalone `tracecite-mobile` CLI explicitly hosts the same extension
+before dispatching a command.
 
 <img src="architecture.svg" alt="Mobile architecture: Device, Analysis, Knowledge, Plugin layers on Core" width="100%"/>
 
@@ -126,7 +141,8 @@ tracecite-mobile preset add --name my-preset --terms "payment failed, network ti
 tracecite-mobile scenario run crash-investigation.json
 ```
 
-**Knowledge accumulation.** Patterns and features discovered during investigations are saved locally:
+**Knowledge candidates.** Candidate terms discovered during investigations can
+be saved and audited locally:
 
 ```bash
 tracecite-mobile grow auto app.log --preset my-app   # auto-discover from logs
@@ -134,10 +150,12 @@ tracecite-mobile grow audit --preset my-app           # prune unused terms
 ```
 
 All knowledge stays in the `.tracecite/` local directory. Nothing is uploaded.
+Candidates are not proven diagnoses: an Agent conclusion is never sufficient to
+promote itself into trusted knowledge, and zero matches do not prove absence.
 
 ## See Also
 
-- [**tracecite-core**](../tracecite-core/) — the underlying text analysis engine.
+- [**TraceCite**](../tracecite-core/) — main distribution: Core, Runtime, and Extension API.
 
 ## License
 

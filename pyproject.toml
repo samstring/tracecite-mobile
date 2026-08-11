@@ -17,7 +17,12 @@ classifiers = [
   "Programming Language :: Python :: 3",
   "Environment :: Console",
 ]
-dependencies = ["tracecite-core>=0.1.0,<0.2.0"]
+dependencies = [
+  "tracecite>=0.1.0,<0.2.0",
+]
+
+[project.entry-points."tracecite.extensions"]
+mobile = "tracecite_mobile.extension"
 
 [project.optional-dependencies]
 dev = ["build>=1", "pytest>=7"]

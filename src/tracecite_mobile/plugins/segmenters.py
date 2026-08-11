@@ -287,7 +287,7 @@ class MixedLogSegmenter(Segmenter):
         return self._device.parse_time_argument(raw, reference=reference)
 
 
-# 注册到 _BUILDERS 的条目在 __init__.py 的 register_all() 中处理
+# Public registration is performed by tracecite_mobile.extension.register().
 
 
 def detect_segmenter_kind(path, *, sample_lines=200):

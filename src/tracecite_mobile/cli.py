@@ -81,8 +81,13 @@ def _ensure_default_knowledge_on_start(args: argparse.Namespace) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from tracecite.extension import ExtensionAPI
+
+    from .extension import register as register_extension
     from .plugin_sdk import load_analyzer_plugins
 
+    # The standalone Mobile CLI is an explicit host of the Mobile extension.
+    register_extension(ExtensionAPI())
     plugin_results = load_analyzer_plugins(strict=False)
 
     parser = build_parser()
