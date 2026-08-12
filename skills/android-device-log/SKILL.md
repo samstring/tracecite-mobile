@@ -144,8 +144,10 @@ tracecite-mobile --platform android filter "$LOG" --snapshot --last 10m --grep '
 
 ```bash
 # 中性任务流场景（先创建 task-flow 并添加稳定词）
-tracecite-mobile --platform android grow scenario task-flow --title "Task flow"
-tracecite-mobile --platform android grow term android-custom 'task.started' 'task.completed' 'request.failed' --scenario task-flow
+tracecite-mobile --platform android grow propose scenario task-flow --title "Task flow" --created-by agent-a --case-id run-1 --evidence evidence://run/1#manifest
+# 用第二个独立案例 verify，再由不同人工审核人 promote；禁止直接 grow term/marker/learning/auto。
+tracecite-mobile --platform android grow verify kc-DEMO --case-id run-2 --outcome support --verified-by agent-b --evidence evidence://run/2#manifest
+tracecite-mobile --platform android grow promote kc-DEMO --approved-by human-reviewer
 tracecite-mobile --platform android filter "$LOG" --snapshot --last 5m --preset android-custom --scenario task-flow --json
 ```
 

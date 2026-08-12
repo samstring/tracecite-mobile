@@ -101,9 +101,10 @@ tracecite-mobile behavior summarize "$FILTERED_LOG" --json
 当项目出现新的任务流问题时，先创建场景，再追加稳定词和 marker：
 
 ```bash
-tracecite-mobile grow scenario task-flow --title "Task flow"
-tracecite-mobile grow term user-behavior 'task.started' 'task.completed' 'request.failed' --scenario task-flow
-tracecite-mobile grow marker 'task.completed' --scenario task-flow --category task.completed --label 'Task completed'
+tracecite-mobile grow propose scenario task-flow --title "Task flow" --created-by agent-a --case-id run-1 --evidence evidence://run/1#manifest
+# 用第二个独立案例 verify，再由不同人工审核人 promote；场景晋升后再提出 term/marker 候选。
+tracecite-mobile grow verify kc-DEMO --case-id run-2 --outcome support --verified-by agent-b --evidence evidence://run/2#manifest
+tracecite-mobile grow promote kc-DEMO --approved-by human-reviewer
 tracecite-mobile filter "$LOG" --snapshot --last 5m --preset user-behavior --scenario task-flow --json
 ```
 

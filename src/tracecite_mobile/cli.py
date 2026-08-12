@@ -80,6 +80,27 @@ def _ensure_default_knowledge_on_start(args: argparse.Namespace) -> None:
         print(f"已为项目初始化默认知识库: {path}", file=sys.stderr)
 
 
+def _check_knowledge_governance_on_start(args: argparse.Namespace) -> bool:
+    """Fail closed when managed knowledge changed outside promotion."""
+
+    if not _should_ensure_default_knowledge(args):
+        return True
+    if args.command == "grow" and getattr(args, "grow_command", None) == "doctor":
+        return True
+    from tracecite.knowledge import KnowledgeGovernanceError
+
+    from .analysis.knowledge_governance import require_mobile_knowledge_integrity
+
+    try:
+        require_mobile_knowledge_integrity(
+            Path.cwd(), platform=getattr(args, "platform", "ios")
+        )
+    except KnowledgeGovernanceError as exc:
+        print(f"错误: {exc}", file=sys.stderr)
+        return False
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
     from tracecite.extension import ExtensionAPI
 
@@ -99,6 +120,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"错误: 插件加载失败: {names}；请执行 tracecite-mobile plugin doctor", file=sys.stderr)
         return 1
     _ensure_default_knowledge_on_start(args)
+    if not _check_knowledge_governance_on_start(args):
+        return 2
 
     for dispatch in (
         dispatch_device_command,

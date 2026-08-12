@@ -114,7 +114,8 @@ before dispatching a command.
 
 ```bash
 tracecite-mobile filter app.log --preset system-lifecycle --json
-tracecite-mobile preset add --name my-preset --terms "payment failed, network timeout, order error"
+tracecite-mobile grow propose term my-preset "payment failed" "network timeout" \
+  --created-by agent-a --case-id run-001 --evidence evidence://run/001#manifest
 ```
 
 **Scenario files.** Save investigation steps as JSON — team-sharable, version-controllable:
@@ -141,17 +142,24 @@ tracecite-mobile preset add --name my-preset --terms "payment failed, network ti
 tracecite-mobile scenario run crash-investigation.json
 ```
 
-**Knowledge candidates.** Candidate terms discovered during investigations can
-be saved and audited locally:
+**Knowledge governance.** Agent findings first enter a physically separate
+candidate store. A second independent case verifies them; a different reviewer
+then authorizes promotion:
 
 ```bash
-tracecite-mobile grow auto app.log --preset my-app   # auto-discover from logs
-tracecite-mobile grow audit --preset my-app           # prune unused terms
+tracecite-mobile grow suggest app.log --preset my-app
+tracecite-mobile grow propose learning "Bounded evidence is required" \
+  --created-by agent-a --case-id run-001 --evidence evidence://run/001#manifest
+tracecite-mobile grow verify kc-ID --case-id run-002 --outcome support \
+  --verified-by agent-b --evidence evidence://run/002#manifest
+tracecite-mobile grow promote kc-ID --approved-by human-reviewer
+tracecite-mobile grow doctor
 ```
 
-All knowledge stays in the `.tracecite/` local directory. Nothing is uploaded.
-Candidates are not proven diagnoses: an Agent conclusion is never sufficient to
-promote itself into trusted knowledge, and zero matches do not prove absence.
+Legacy direct writes (`preset add`, `grow term/marker/learning/playbook/auto`)
+are rejected by the Agent CLI. Candidate and trusted knowledge stay in separate
+files under `.tracecite/`; nothing is uploaded. A changed trusted file fails its
+integrity gate until restored through the governed workflow.
 
 ## See Also
 
