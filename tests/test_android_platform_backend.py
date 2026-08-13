@@ -11,6 +11,7 @@ from tracecite_mobile.platforms.base import RunResult
 from tracecite_mobile.platforms.models import DeviceRef
 from tracecite_mobile.platforms.android.backend import AndroidBackend
 from tracecite_mobile.platforms.android import logger, profiler
+from tracecite_mobile.device import archive
 
 
 class _Proc:
@@ -19,6 +20,40 @@ class _Proc:
     def __init__(self) -> None:
         self.pid = _Proc.next_pid
         _Proc.next_pid += 1
+
+
+class _Clock:
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        self.value += seconds
+
+
+class _StreamProc:
+    def __init__(self, lines) -> None:
+        self.pid = 7100
+        self.stdout = iter(lines)
+
+    def poll(self):
+        return 0
+
+    def terminate(self):
+        return None
+
+    def wait(self, timeout=None):
+        return 0
+
+
+class _LogClient:
+    def __init__(self, proc) -> None:
+        self.proc = proc
+
+    def spawn_logcat(self, *args, **kwargs):
+        return self.proc
 
 
 class _Runner:
@@ -65,12 +100,72 @@ def test_capabilities_and_environment_use_public_keys() -> None:
     caps = backend.capabilities()
     assert caps.multi_device_session
     assert caps.performance_profiles == ("startup", "frame", "memory", "network")
-    assert caps.platform_options["automatic_rotation"] is False
+    assert caps.platform_options["automatic_rotation"] is True
     assert set(backend.probe_environment().checks) == {
         "device_bridge",
         "log_stream",
         "performance",
     }
+
+
+def test_android_foreground_stream_rotates_only_after_30_minute_check(
+    tmp_path, capsys
+) -> None:
+    """The Android adapter uses the shared time scheduler, not byte checks."""
+
+    clock = _Clock()
+    root = tmp_path
+    hot = root / "android_live_Pixel.log"
+    old = "07-31 10:00:00.000  100  100 I Demo: OLD\n"
+    middle = "07-31 10:20:00.000  100  100 I Demo: MIDDLE\n"
+    newest = "07-31 10:40:00.000  100  100 I Demo: NEWEST\n"
+
+    def lines():
+        yield old
+        clock.advance(30 * 60 - 1)
+        yield middle
+        # A short check interval must not be bypassed by the next write.
+        assert not (root / ".archive").exists()
+        clock.advance(1)
+        yield newest
+
+    proc = _StreamProc(lines())
+    client = _LogClient(proc)
+    ref = DeviceRef("android", "SERIAL", "Pixel", model="Pixel")
+    logger.stream_logs(
+        client,
+        ref,
+        output_path=hot,
+        also_stdout=False,
+        hot_window_sec=30 * 60,
+        archive_interval_sec=30 * 60,
+        clock=clock,
+    )
+
+    captured = capsys.readouterr()
+    assert "日志已保存" in captured.out
+    hot_text = hot.read_text(encoding="utf-8")
+    assert "OLD" not in hot_text
+    assert "MIDDLE" in hot_text and "NEWEST" in hot_text
+    listed = archive.list_archive_segments(root)
+    assert listed["devices"]["Pixel"]["segment_count"] == 1
+    assert ".archive" in listed["devices"]["Pixel"]["archive_dir"]
+
+
+def test_android_writer_lifecycle_bridge_starts_and_closes_scheduler() -> None:
+    events: list[str] = []
+
+    class Writer:
+        def start_scheduler(self) -> None:
+            events.append("start")
+
+        def close(self) -> None:
+            events.append("close")
+
+    writer = Writer()
+    logger._start_writer_scheduler(writer)  # type: ignore[arg-type]
+    logger._close_writer_scheduler(writer)  # type: ignore[arg-type]
+    assert events == ["start", "close"]
 
 
 def test_multi_device_sessions_have_canonical_state_and_safe_stop(tmp_path, monkeypatch) -> None:
@@ -91,6 +186,27 @@ def test_multi_device_sessions_have_canonical_state_and_safe_stop(tmp_path, monk
     stopped = backend.stop_sessions(output_dir=tmp_path, all_devices=True)
     assert stopped.state == "stopped"
     assert stopped.session_count == 2
+
+
+def test_production_session_persists_hidden_rotation_contract(tmp_path, monkeypatch) -> None:
+    backend, _ = _backend()
+    ref = DeviceRef("android", "A", "Pixel", model="Pixel")
+    collector = _Proc()
+    monkeypatch.setattr(logger, "_spawn_rotating_collector", lambda *a, **k: collector)
+    monkeypatch.setattr(logger, "_pid_alive", lambda pid: True)
+    state = backend.start_session(
+        ref,
+        output_dir=tmp_path,
+        hot_window_sec=1200,
+        archive_interval_sec=1800,
+    )
+    assert state["collector_mode"] == "rotating-reader"
+    assert state["collector_marker"] == logger._COLLECTOR_MARKER
+    assert state["hot_window_sec"] == 1200
+    assert state["archive_interval_sec"] == 1800.0
+    assert state["archive_dir"].endswith("/.archive/Pixel")
+    saved = json.loads((tmp_path / ".tracecite-session.json").read_text(encoding="utf-8"))
+    assert saved["archive_dir"] == state["archive_dir"]
 
 
 def test_multi_device_output_file_is_rejected(tmp_path) -> None:

@@ -53,6 +53,21 @@ tracecite-mobile filter --from-sessions --snapshot --last 2m --preset system-fau
 tracecite-mobile behavior summarize --from-sessions --json
 ```
 
+Live logs keep a 30-minute hot window. Active collectors perform one archive
+check every 30 minutes and move expired records into the hidden internal
+`.archive/` store. Use `archive list` and `archive pull`; direct folder
+management is neither required nor recommended.
+
+Maintenance is explicit: `clean analysis --before today` removes only old
+logs, performance outputs, and unpinned completed analysis runs. Runtime state,
+locks, active/recovery outputs, and malformed manifests are kept fail-closed.
+The default pass also inspects the project-local `.tracecite/runs` directory
+and redirected `.runs` containers under log/capture outputs, one run directory
+at a time.
+Archive evidence is excluded by default. Preview it with
+`clean analysis --include-archive --dry-run`; an actual archive deletion
+requires both `--include-archive --yes`.
+
 After one full investigation, the agent has:
 
 - **Structured hits within a time window** — which line, what time, what keyword matched

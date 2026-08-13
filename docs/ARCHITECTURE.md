@@ -65,3 +65,22 @@ Background log sessions treat collector and device logs as mutable live outputs:
 
 Project metadata lives in `.tracecite/`; default run artifacts live under
 `~/Desktop/TraceCite/analysis/runs/`.
+
+## Hot-log archive lifecycle
+
+The live log and archive policies are intentionally separate:
+
+- the hot window defaults to 30 minutes and defines which recent records remain
+  in the actively written log;
+- active collectors check archive eligibility once every 30 minutes, based on a
+  monotonic interval rather than byte volume;
+- an interval check moves only records older than the hot-window cutoff, and an
+  empty/no-op interval never creates an archive segment;
+- new segments and manifests are internal implementation artifacts under the
+  hidden `<log-dir>/.archive/` tree. Users access them through `archive list` and
+  `archive pull`; the historical visible `<log-dir>/archive/` tree remains
+  readable for migration compatibility.
+
+Cleanup never removes archive evidence by default. Archive deletion requires an
+explicit cleanup option and confirmation; active session/performance state and
+running or pinned evidence runs always fail closed or remain protected.

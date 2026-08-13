@@ -56,6 +56,18 @@ tracecite-mobile filter --from-sessions --snapshot --last 2m --preset system-fau
 tracecite-mobile behavior summarize --from-sessions --json
 ```
 
+实时日志默认保留最近 30 分钟作为 hot 窗口；采集器每 30 分钟执行一次归档检查，
+把已过期的数据移入隐藏的内部 `.archive/`。日常只需使用 `archive list` 和
+ `archive pull`，不需要、也不建议直接管理该目录。
+
+维护清理是显式操作：`clean analysis --before today` 只清理过期日志、性能产物
+和未 pinned 的已完成分析运行；运行状态、锁、仍在采集/恢复中的产物以及损坏的
+manifest 会 fail-closed 保留。默认还会检查项目 `.tracecite/runs`，以及日志/性能
+输出目录下重定向产生的 `.runs` 容器，并逐个运行目录判断，不会整体删除容器。
+归档证据默认不碰；先用
+`clean analysis --include-archive --dry-run` 预览，实际删除必须同时指定
+`--include-archive --yes`。
+
 一次完整的排查跑下来，Agent 拿到：
 
 - **时间窗内的结构化命中** — 哪一行、什么时间、匹配了什么关键词

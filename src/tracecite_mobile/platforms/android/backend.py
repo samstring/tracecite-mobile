@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import time
 from pathlib import Path
 from typing import Any, List, Optional, Sequence, Union
 
@@ -28,6 +29,7 @@ from .adb import AndroidAdbClient, AndroidBackendError, AdbDeviceNotFoundError
 from . import devices as android_devices
 from . import logger as android_logger
 from . import profiler as android_profiler
+from ...shared.constants import DEFAULT_ARCHIVE_INTERVAL_SEC, DEFAULT_HOT_WINDOW_SEC
 
 
 _SCREEN_ACTIVITY_RE = re.compile(
@@ -53,8 +55,8 @@ class AndroidBackend(BaseBackend):
     def capabilities(self) -> Capabilities:
         """Declare only stable Android semantics.
 
-        Diagnostics/crash and automatic archive rotation are intentionally not
-        advertised until their evidence and lifecycle contracts are complete.
+        Diagnostics/crash remain fail-closed, while log collection advertises
+        time-based rotation as part of the stable archive lifecycle.
         """
 
         return Capabilities(
@@ -70,7 +72,7 @@ class AndroidBackend(BaseBackend):
             diagnostics=(),
             crash=(),
             platform_options={
-                "automatic_rotation": False,
+                "automatic_rotation": True,
                 "multi_device_session": True,
                 "performance_profiles": {
                     "startup": "startup",
@@ -300,6 +302,18 @@ class AndroidBackend(BaseBackend):
             priority=kwargs.get("priority"),
             tag=kwargs.get("tag"),
             pid=kwargs.get("pid"),
+            hot_window_sec=int(
+                kwargs.get("hot_window_sec")
+                if kwargs.get("hot_window_sec") is not None
+                else DEFAULT_HOT_WINDOW_SEC
+            ),
+            archive_interval_sec=float(
+                kwargs.get("archive_interval_sec")
+                if kwargs.get("archive_interval_sec") is not None
+                else DEFAULT_ARCHIVE_INTERVAL_SEC
+            ),
+            archive_dir=Path(kwargs["archive_dir"]) if kwargs.get("archive_dir") else None,
+            clock=kwargs.get("clock") or time.monotonic,
         )
         return LogSessionResult(
             platform="android",
@@ -327,6 +341,17 @@ class AndroidBackend(BaseBackend):
             include_date=include_date,
             output_file=output_file,
             popen=popen,
+            hot_window_sec=int(
+                kwargs.get("hot_window_sec")
+                if kwargs.get("hot_window_sec") is not None
+                else DEFAULT_HOT_WINDOW_SEC
+            ),
+            archive_interval_sec=float(
+                kwargs.get("archive_interval_sec")
+                if kwargs.get("archive_interval_sec") is not None
+                else DEFAULT_ARCHIVE_INTERVAL_SEC
+            ),
+            archive_dir=Path(kwargs["archive_dir"]) if kwargs.get("archive_dir") else None,
         )
 
     def get_session_status(self, *, output_dir: Optional[Path] = None) -> dict:
@@ -403,6 +428,17 @@ class AndroidBackend(BaseBackend):
             include_date=bool(kwargs.get("include_date", False)),
             output_file=Path(kwargs["output_file"]) if kwargs.get("output_file") else None,
             popen=kwargs.get("popen"),
+            hot_window_sec=int(
+                kwargs.get("hot_window_sec")
+                if kwargs.get("hot_window_sec") is not None
+                else DEFAULT_HOT_WINDOW_SEC
+            ),
+            archive_interval_sec=float(
+                kwargs.get("archive_interval_sec")
+                if kwargs.get("archive_interval_sec") is not None
+                else DEFAULT_ARCHIVE_INTERVAL_SEC
+            ),
+            archive_dir=Path(kwargs["archive_dir"]) if kwargs.get("archive_dir") else None,
         )
         return self._session_status(payload, state="running")
 

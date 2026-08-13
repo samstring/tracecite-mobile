@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import BinaryIO, Callable, Optional, TextIO
 
 from ..shared.constants import (
+    DEFAULT_ARCHIVE_INTERVAL_SEC,
     DEFAULT_HOT_WINDOW_SEC,
     DEFAULT_PROCESS_NAME,
     DEFAULT_SUBSYSTEM,
@@ -179,10 +180,7 @@ def _run_syslog_once(
     process_name: str,
     subsystem_filter: str,
     output_path: Path,
-    also_stdout: bool,
-    hot_window_sec: int,
-    rotate_check_bytes: int,
-    open_mode: str,
+    writer: TextIO,
     stall_sec: float,
 ) -> str:
     """
@@ -190,8 +188,6 @@ def _run_syslog_once(
     返回: "eof" | "stall"（stall 时已清理子进程，由上层决定是否重试）
     KeyboardInterrupt 向上抛。
     """
-    from .archive import HotRotatingWriter
-
     heartbeat = stream_heartbeat_path(output_path)
     on_activity = _make_activity_toucher(heartbeat)
     # 启动即 touch，避免 status 在首包到达前误判 stalled
@@ -215,22 +211,12 @@ def _run_syslog_once(
     )
     outcome = "eof"
     try:
-        with output_path.open(open_mode, encoding="utf-8") as fp:
-            writer = HotRotatingWriter(
-                fp,
-                hot_path=output_path,
-                device_name=device.name,
-                hot_window_sec=hot_window_sec,
-                check_bytes=rotate_check_bytes,
-                mirror=also_stdout,
-                mirror_stream=sys.stdout if also_stdout else None,
-            )
-            process_stream(
-                reader,  # type: ignore[arg-type]
-                writer,
-                process_name=process_name,
-                subsystem_filter=subsystem_filter,
-            )
+        process_stream(
+            reader,  # type: ignore[arg-type]
+            writer,
+            process_name=process_name,
+            subsystem_filter=subsystem_filter,
+        )
     except StallError:
         outcome = "stall"
         raise
@@ -250,6 +236,7 @@ def stream_logs(
     also_stdout: bool = True,
     hot_window_sec: int = DEFAULT_HOT_WINDOW_SEC,
     rotate_check_bytes: int = HOT_ROTATE_CHECK_BYTES,
+    archive_interval_sec: float = DEFAULT_ARCHIVE_INTERVAL_SEC,
     stall_sec: float = STREAM_RAW_STALL_SEC,
     reconnect_sleep_sec: float = STREAM_RECONNECT_SLEEP_SEC,
 ) -> None:
@@ -265,53 +252,65 @@ def stream_logs(
         print(f"过滤: 仅保留 {process_name}({subsystem_filter})")
     print(f"输出: {output_path}")
     print(f"hot 窗口: {hot_window_sec}s（更早日志 rewind 到 .archive）")
+    print(f"归档调度: 每 {int(archive_interval_sec)}s 检查一次")
     print(f"stall 重启: 原始 syslog {int(stall_sec)}s 无输出则自动重启 idevicesyslog")
     print()
     print("开始采集… 按 Ctrl+C 结束")
     print("-" * 40)
 
     restart_count = 0
-    first_open = True
+    from .archive import HotRotatingWriter
+
     try:
-        while True:
-            open_mode = "w" if first_open else "a"
-            first_open = False
-            try:
-                _run_syslog_once(
-                    device,
-                    process_name=process_name,
-                    subsystem_filter=subsystem_filter,
-                    output_path=output_path,
-                    also_stdout=also_stdout,
-                    hot_window_sec=hot_window_sec,
-                    rotate_check_bytes=rotate_check_bytes,
-                    open_mode=open_mode,
-                    stall_sec=stall_sec,
-                )
-                # EOF：设备断开或 idevicesyslog 退出 → 等待后重连
-                restart_count += 1
-                print(
-                    f"idevicesyslog 已退出，{reconnect_sleep_sec:.0f}s 后重连 "
-                    f"(#{restart_count})",
-                    flush=True,
-                )
-                time.sleep(reconnect_sleep_sec)
-            except StallError as exc:
-                restart_count += 1
-                print(
-                    f"{exc}；自动重启 idevicesyslog (#{restart_count})",
-                    flush=True,
-                )
-                continue
-            except Exception as exc:  # noqa: BLE001 - 兜底：单轮采集异常不崩进程
-                restart_count += 1
-                print(
-                    f"采集异常，{reconnect_sleep_sec:.0f}s 后重连 "
-                    f"(#{restart_count}): {exc!r}",
-                    flush=True,
-                )
-                time.sleep(reconnect_sleep_sec)
-                continue
+        # Keep one hot-file owner and one scheduler for the whole session.
+        # Recreating them on every stall reconnect would reset the 30-minute
+        # archive clock indefinitely on a quiet device.
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        with output_path.open("w", encoding="utf-8") as fp:
+            with HotRotatingWriter(
+                fp,
+                hot_path=output_path,
+                device_name=device.name,
+                hot_window_sec=hot_window_sec,
+                check_bytes=rotate_check_bytes,
+                archive_interval_sec=archive_interval_sec,
+                mirror=also_stdout,
+                mirror_stream=sys.stdout if also_stdout else None,
+            ) as writer:
+                while True:
+                    try:
+                        _run_syslog_once(
+                            device,
+                            process_name=process_name,
+                            subsystem_filter=subsystem_filter,
+                            output_path=output_path,
+                            writer=writer,
+                            stall_sec=stall_sec,
+                        )
+                        # EOF：设备断开或 idevicesyslog 退出 → 等待后重连
+                        restart_count += 1
+                        print(
+                            f"idevicesyslog 已退出，{reconnect_sleep_sec:.0f}s 后重连 "
+                            f"(#{restart_count})",
+                            flush=True,
+                        )
+                        time.sleep(reconnect_sleep_sec)
+                    except StallError as exc:
+                        restart_count += 1
+                        print(
+                            f"{exc}；自动重启 idevicesyslog (#{restart_count})",
+                            flush=True,
+                        )
+                        continue
+                    except Exception as exc:  # noqa: BLE001 - 单轮异常不崩进程
+                        restart_count += 1
+                        print(
+                            f"采集异常，{reconnect_sleep_sec:.0f}s 后重连 "
+                            f"(#{restart_count}): {exc!r}",
+                            flush=True,
+                        )
+                        time.sleep(reconnect_sleep_sec)
+                        continue
     except KeyboardInterrupt:
         pass
     finally:

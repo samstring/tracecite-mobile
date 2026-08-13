@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from ..shared.constants import (
+    DEFAULT_ARCHIVE_INTERVAL_SEC,
     DEFAULT_CAPTURE_OUTPUT_DIR,
     DEFAULT_HOT_WINDOW_SEC,
     DEFAULT_LOG_OUTPUT_DIR,
@@ -597,6 +598,12 @@ def _dispatch_backend(args: argparse.Namespace) -> int:
                 output_path=output_path,
                 also_stdout=not args.no_stdout,
                 subsystem=args.subsystem or getattr(profile, "subsystem", "all"),
+                hot_window_sec=(
+                    getattr(args, "hot_window_sec", None)
+                    or getattr(profile, "hot_window_sec", None)
+                    or DEFAULT_HOT_WINDOW_SEC
+                ),
+                archive_interval_sec=DEFAULT_ARCHIVE_INTERVAL_SEC,
             )
             payload = _finish_device_run(
                 command_run,
@@ -696,6 +703,7 @@ def _dispatch_backend(args: argparse.Namespace) -> int:
                     if getattr(args, "output_file", None)
                     else None,
                     hot_window_sec=getattr(args, "hot_window_sec", None),
+                    archive_interval_sec=DEFAULT_ARCHIVE_INTERVAL_SEC,
                 )
                 payload = _session_payload(result, started=True)
             else:

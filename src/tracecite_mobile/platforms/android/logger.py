@@ -10,11 +10,13 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 import re
 import signal
 import subprocess
 import sys
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -29,6 +31,8 @@ from tracecite_core.state_file import (
 
 from ..models import DeviceRef
 from .adb import AndroidAdbClient
+from ...shared.constants import DEFAULT_ARCHIVE_INTERVAL_SEC, DEFAULT_HOT_WINDOW_SEC
+from ...device.archive import HotRotatingWriter, archive_device_dir
 
 # 跟踪后台 session 打开的文件句柄，stop 时关闭
 _session_log_fps: Dict[str, TextIO] = {}
@@ -41,6 +45,30 @@ _THREADTIME_RE = re.compile(
 )
 _SESSION_FILENAME = ".tracecite-session.json"
 _SESSIONS_FILENAME = ".tracecite-sessions.json"
+_COLLECTOR_MARKER = "tracecite-android-rotating-collector"
+
+
+def _start_writer_scheduler(writer: HotRotatingWriter) -> None:
+    """Start the shared idle-time archive scheduler when available.
+
+    Older writer implementations are write-triggered only; keeping this
+    compatibility shim lets Android consume the scheduler without coupling
+    the backend to a concrete archive implementation version.
+    """
+
+    starter = getattr(writer, "start_scheduler", None)
+    if not callable(starter):
+        starter = getattr(writer, "start", None)
+    if callable(starter):
+        starter()
+
+
+def _close_writer_scheduler(writer: HotRotatingWriter) -> None:
+    closer = getattr(writer, "close", None)
+    if callable(closer):
+        closer()
+    else:
+        writer.flush()
 
 
 def sanitize_filename(text: str) -> str:
@@ -157,8 +185,20 @@ def stream_logs(
     priority: Optional[str] = None,
     tag: Optional[str] = None,
     pid: Optional[int] = None,
+    hot_window_sec: int = DEFAULT_HOT_WINDOW_SEC,
+    archive_interval_sec: float = DEFAULT_ARCHIVE_INTERVAL_SEC,
+    archive_dir: Optional[Path] = None,
+    clock=time.monotonic,
 ) -> int:
-    """前台采集 logcat 直到 Ctrl+C；写出文件并可选镜像终端。"""
+    """前台采集 logcat 直到 Ctrl+C，并按时间归档旧日志。
+
+    ``archive_interval_sec`` 只控制归档检查周期；低流量写入不会因为字节
+    数触发频繁检查。归档实现统一写入输出目录下隐藏的 ``.archive``，
+    ``archive_dir`` 仅作为状态/调用方语义保留，默认值由同一目录和设备名
+    推导，避免用户需要管理归档目录。
+    """
+    output_path = Path(output_path).expanduser().resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     proc = client.spawn_logcat(
         ref.identifier, output_path, priority=priority, tag=tag, pid=pid
     )
@@ -182,11 +222,33 @@ def stream_logs(
     print()
     print("开始采集… 按 Ctrl+C 结束")
     print("-" * 40)
+    # ``HotRotatingWriter`` owns the same hot file handle for the complete
+    # foreground stream. It checks elapsed time, not byte volume, and rewrites
+    # the handle in place so the collector never writes directly around a
+    # separate truncate pass.
+    # The shared archive adapter always writes below the hidden canonical
+    # root next to the hot file. Keep the optional argument for API symmetry,
+    # but do not allow a visible/custom path to bypass that invariant.
+    # Touching no custom path here is intentional; archive_device_dir is
+    # persisted for sessions below and HotRotatingWriter derives the same root.
     try:
         with output_path.open("a", encoding="utf-8") as fp:
-            writer = _TeeWriter(fp, also_stdout)
-            for line in proc.stdout:
-                writer.write(line)
+            writer = HotRotatingWriter(
+                fp,
+                hot_path=output_path,
+                device_name=ref.name or ref.identifier,
+                hot_window_sec=int(hot_window_sec),
+                archive_interval_sec=float(archive_interval_sec),
+                mirror=also_stdout,
+                mirror_stream=sys.stdout,
+                clock=clock,
+            )
+            try:
+                _start_writer_scheduler(writer)
+                for line in proc.stdout:
+                    writer.write(line)
+            finally:
+                _close_writer_scheduler(writer)
     except KeyboardInterrupt:
         pass
     finally:
@@ -202,6 +264,158 @@ def stream_logs(
         if output_path.is_file():
             print(f"大小: {output_path.stat().st_size} bytes")
     return 0
+
+
+def _collector_command(
+    client: AndroidAdbClient,
+    ref: DeviceRef,
+    *,
+    output_path: Path,
+    package: str,
+    app_pid: Optional[int],
+    hot_window_sec: int,
+    archive_interval_sec: float,
+) -> List[str]:
+    """Build the detached rotating-reader command used by production sessions."""
+
+    command = [
+        sys.executable,
+        "-m",
+        __name__,
+        "--rotating-collector",
+        "--marker",
+        _COLLECTOR_MARKER,
+        "--serial",
+        ref.identifier,
+        "--device-name",
+        ref.name or ref.identifier,
+        "--output",
+        str(output_path),
+        "--hot-window-sec",
+        str(int(hot_window_sec)),
+        "--archive-interval-sec",
+        str(float(archive_interval_sec)),
+    ]
+    if client.adb_path:
+        command.extend(["--adb-path", str(client.adb_path)])
+    if package:
+        command.extend(["--package", package])
+    if app_pid is not None:
+        command.extend(["--app-pid", str(int(app_pid))])
+    return command
+
+
+def _spawn_rotating_collector(
+    client: AndroidAdbClient,
+    ref: DeviceRef,
+    *,
+    output_path: Path,
+    package: str,
+    app_pid: Optional[int],
+    hot_window_sec: int,
+    archive_interval_sec: float,
+):
+    """Start a detached reader that owns the hot file and safe rotation.
+
+    The adb child writes to the reader's pipe, never directly to the hot file.
+    The reader is a small Python host process so ``session start`` can return
+    while rotation continues independently of the CLI process lifetime.
+    """
+
+    command = _collector_command(
+        client,
+        ref,
+        output_path=output_path,
+        package=package,
+        app_pid=app_pid,
+        hot_window_sec=hot_window_sec,
+        archive_interval_sec=archive_interval_sec,
+    )
+    try:
+        return subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+            text=True,
+        )
+    except OSError as exc:
+        raise RuntimeError(f"无法启动 Android 归档 reader: {exc}") from exc
+
+
+def _run_rotating_collector(
+    *,
+    serial: str,
+    device_name: str,
+    output_path: Path,
+    package: str,
+    app_pid: Optional[int],
+    adb_path: Optional[str],
+    hot_window_sec: int,
+    archive_interval_sec: float,
+) -> int:
+    """Reader-host entrypoint; kept private and never part of public models."""
+
+    client = AndroidAdbClient(adb_path=adb_path)
+    proc = client.spawn_logcat(serial, output_path, pid=app_pid)
+    if proc.stdout is None:
+        return 2
+    output_path = Path(output_path).expanduser().resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("a", encoding="utf-8") as fp:
+        writer = HotRotatingWriter(
+            fp,
+            hot_path=output_path,
+            device_name=device_name or serial,
+            hot_window_sec=int(hot_window_sec),
+            archive_interval_sec=float(archive_interval_sec),
+            clock=time.monotonic,
+        )
+        try:
+            _start_writer_scheduler(writer)
+            for line in proc.stdout:
+                writer.write(line)
+        except (KeyboardInterrupt, BrokenPipeError):
+            pass
+        finally:
+            if proc.poll() is None:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            _close_writer_scheduler(writer)
+    return 0
+
+
+def _collector_main(argv: Optional[List[str]] = None) -> int:
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--rotating-collector", action="store_true")
+    parser.add_argument("--marker", default="")
+    parser.add_argument("--serial", required=True)
+    parser.add_argument("--device-name", default="")
+    parser.add_argument("--output", required=True)
+    parser.add_argument("--package", default="")
+    parser.add_argument("--app-pid", type=int)
+    parser.add_argument("--adb-path")
+    parser.add_argument("--hot-window-sec", type=int, default=DEFAULT_HOT_WINDOW_SEC)
+    parser.add_argument(
+        "--archive-interval-sec", type=float, default=DEFAULT_ARCHIVE_INTERVAL_SEC
+    )
+    args = parser.parse_args(argv)
+    if not args.rotating_collector or args.marker != _COLLECTOR_MARKER:
+        return 2
+    return _run_rotating_collector(
+        serial=args.serial,
+        device_name=args.device_name,
+        output_path=Path(args.output),
+        package=args.package,
+        app_pid=args.app_pid,
+        adb_path=args.adb_path,
+        hot_window_sec=args.hot_window_sec,
+        archive_interval_sec=args.archive_interval_sec,
+    )
 
 
 # ---------------- 后台 session ----------------
@@ -335,6 +549,9 @@ def _start_session_unlocked(
     include_date: bool = False,
     output_file: Optional[Path] = None,
     popen=None,
+    hot_window_sec: int = DEFAULT_HOT_WINDOW_SEC,
+    archive_interval_sec: float = DEFAULT_ARCHIVE_INTERVAL_SEC,
+    archive_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """后台启动 logcat 采集，写入状态文件。popen 可注入用于测试。"""
     output_dir = Path(output_dir).expanduser().resolve()
@@ -350,6 +567,9 @@ def _start_session_unlocked(
     output_path = build_log_output_path(
         output_dir, ref, include_date=include_date, output_file=output_file
     ).expanduser().resolve()
+    # Derive from the actual hot-file parent so custom ``output_file`` paths
+    # still report the same hidden archive location that the writer uses.
+    canonical_archive_dir = archive_device_dir(output_path.parent, ref.name)
     app_pid = client.pidof(ref.identifier, package) if package else None
     started_at = datetime.now().isoformat(timespec="seconds")
     write_log_metadata(
@@ -363,25 +583,36 @@ def _start_session_unlocked(
         started_at=started_at,
     )
 
-    spawn = popen or client.spawn_logcat
-    # 以文件句柄传入，子进程直接写入 output_path
-    # 注意：log_fp 不在此关闭——子进程正在写入。stop_session 时 kill 进程后关闭。
-    log_fp = open(output_path, "a", encoding="utf-8")
-    try:
-        proc = spawn(
-            ref.identifier,
-            output_path,
-            priority=None,
-            tag=None,
-            pid=app_pid,
-            log_fp=log_fp,
+    if popen is not None:
+        # Test/fake runner compatibility: preserve the historical injectable
+        # signature without starting a real process or reader.
+        spawn = popen
+        log_fp = open(output_path, "a", encoding="utf-8")
+        try:
+            proc = spawn(
+                ref.identifier,
+                output_path,
+                priority=None,
+                tag=None,
+                pid=app_pid,
+                log_fp=log_fp,
+            )
+        except OSError as exc:
+            log_fp.close()
+            raise RuntimeError(f"无法启动后台日志 session: {exc}") from exc
+        _session_log_fps[str(output_path)] = log_fp
+    else:
+        # Production sessions use a detached reader host. adb writes to the
+        # host pipe; only HotRotatingWriter owns and rewrites the hot file.
+        proc = _spawn_rotating_collector(
+            client,
+            ref,
+            output_path=output_path,
+            package=package,
+            app_pid=app_pid,
+            hot_window_sec=int(hot_window_sec),
+            archive_interval_sec=float(archive_interval_sec),
         )
-    except OSError as exc:
-        log_fp.close()
-        raise RuntimeError(f"无法启动后台日志 session: {exc}") from exc
-
-    # 保存文件句柄以便 stop 时关闭
-    _session_log_fps[str(output_path)] = log_fp
 
     state = {
         "platform": "android",
@@ -394,9 +625,13 @@ def _start_session_unlocked(
         "collector_pid": proc.pid,
         "output_path": str(output_path),
         "started_at": started_at,
-        "collector_marker": "logcat",
+        "collector_marker": _COLLECTOR_MARKER if popen is None else "logcat",
         "identity_required": True,
         "collector_test_double": popen is not None,
+        "collector_mode": "rotating-reader" if popen is None else "test-double",
+        "hot_window_sec": int(hot_window_sec),
+        "archive_interval_sec": float(archive_interval_sec),
+        "archive_dir": str(canonical_archive_dir),
     }
     atomic_write_json(session_state_path(output_dir), state)
     return state
@@ -411,6 +646,9 @@ def start_session(
     include_date: bool = False,
     output_file: Optional[Path] = None,
     popen=None,
+    hot_window_sec: int = DEFAULT_HOT_WINDOW_SEC,
+    archive_interval_sec: float = DEFAULT_ARCHIVE_INTERVAL_SEC,
+    archive_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """后台启动 logcat；状态检查和写入在同一把跨进程锁内完成。"""
     output_dir = Path(output_dir).expanduser().resolve()
@@ -432,6 +670,9 @@ def start_session(
                 include_date=include_date,
                 output_file=output_file,
                 popen=popen,
+                hot_window_sec=hot_window_sec,
+                archive_interval_sec=archive_interval_sec,
+                archive_dir=archive_dir,
             )
             current = [
                 dict(row)
@@ -538,12 +779,16 @@ def _new_session_unlocked(
     include_date: bool,
     output_file: Optional[Path],
     popen=None,
+    hot_window_sec: int = DEFAULT_HOT_WINDOW_SEC,
+    archive_interval_sec: float = DEFAULT_ARCHIVE_INTERVAL_SEC,
+    archive_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Start one collector without changing aggregate state."""
 
     output_path = build_log_output_path(
         output_dir, ref, include_date=include_date, output_file=output_file
     ).expanduser().resolve()
+    canonical_archive_dir = archive_device_dir(output_path.parent, ref.name)
     app_pid = client.pidof(ref.identifier, package) if package else None
     started_at = datetime.now().isoformat(timespec="seconds")
     write_log_metadata(
@@ -556,20 +801,32 @@ def _new_session_unlocked(
         command="adb logcat -v threadtime",
         started_at=started_at,
     )
-    spawn = popen or client.spawn_logcat
-    log_fp = open(output_path, "a", encoding="utf-8")
-    try:
-        proc = spawn(
-            ref.identifier,
-            output_path,
-            priority=None,
-            tag=None,
-            pid=app_pid,
-            log_fp=log_fp,
+    if popen is not None:
+        # Keep the injectable fake-runner signature for unit tests.  Real
+        # production sessions use the detached rotating reader below.
+        log_fp = open(output_path, "a", encoding="utf-8")
+        try:
+            proc = popen(
+                ref.identifier,
+                output_path,
+                priority=None,
+                tag=None,
+                pid=app_pid,
+                log_fp=log_fp,
+            )
+        except OSError as exc:
+            log_fp.close()
+            raise RuntimeError(f"无法启动后台日志 session: {exc}") from exc
+    else:
+        proc = _spawn_rotating_collector(
+            client,
+            ref,
+            output_path=output_path,
+            package=package,
+            app_pid=app_pid,
+            hot_window_sec=int(hot_window_sec),
+            archive_interval_sec=float(archive_interval_sec),
         )
-    except OSError as exc:
-        log_fp.close()
-        raise RuntimeError(f"无法启动后台日志 session: {exc}") from exc
     state = {
         "platform": "android",
         "schema_version": 1,
@@ -580,13 +837,18 @@ def _new_session_unlocked(
         "package_name": package,
         "pid": app_pid,
         "collector_pid": getattr(proc, "pid", None),
-        "collector_marker": "logcat",
+        "collector_marker": _COLLECTOR_MARKER if popen is None else "logcat",
         "identity_required": True,
         "collector_test_double": popen is not None,
+        "collector_mode": "rotating-reader" if popen is None else "test-double",
         "output_path": str(output_path),
         "started_at": started_at,
+        "hot_window_sec": int(hot_window_sec),
+        "archive_interval_sec": float(archive_interval_sec),
+        "archive_dir": str(canonical_archive_dir),
     }
-    _session_log_fps[str(output_path)] = log_fp
+    if popen is not None:
+        _session_log_fps[str(output_path)] = log_fp
     return state
 
 
@@ -599,6 +861,9 @@ def start_sessions(
     include_date: bool = False,
     output_file: Optional[Path] = None,
     popen=None,
+    hot_window_sec: int = DEFAULT_HOT_WINDOW_SEC,
+    archive_interval_sec: float = DEFAULT_ARCHIVE_INTERVAL_SEC,
+    archive_dir: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """Start one or more Android collectors into canonical aggregate state.
 
@@ -644,6 +909,9 @@ def start_sessions(
                     include_date=include_date,
                     output_file=output_file,
                     popen=popen,
+                    hot_window_sec=hot_window_sec,
+                    archive_interval_sec=archive_interval_sec,
+                    archive_dir=archive_dir,
                 )
                 started.append(state)
                 current.append(state)
@@ -770,3 +1038,7 @@ def stop_sessions(
             "active": any(_state_alive(row) for row in remaining),
             "session_count": len(remaining),
         }
+
+
+if __name__ == "__main__":  # pragma: no cover - exercised by production host
+    raise SystemExit(_collector_main())

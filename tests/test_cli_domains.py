@@ -37,6 +37,24 @@ def test_filter_parser_accepts_preset_and_grep_together() -> None:
     assert args.grep == "checkout|payment"
 
 
+def test_clean_archive_requires_explicit_flags() -> None:
+    args = build_parser().parse_args(
+        [
+            "clean",
+            "analysis",
+            "--include-archive",
+            "--dry-run",
+            "--before",
+            "yesterday",
+        ]
+    )
+    assert args.command == "clean"
+    assert args.clean_command == "analysis"
+    assert args.include_archive is True
+    assert args.dry_run is True
+    assert args.yes is False
+
+
 def test_scenario_commands_accept_and_forward_base_dir(monkeypatch) -> None:
     for command in ("run", "validate", "explain"):
         args = build_parser().parse_args(

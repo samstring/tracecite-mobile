@@ -297,6 +297,7 @@ class IosBackend(BaseBackend):
             also_stdout=also_stdout,
             hot_window_sec=int(kwargs.get("hot_window_sec", profile.hot_window_sec or 1800)),
             rotate_check_bytes=int(kwargs.get("rotate_check_bytes", 256 * 1024)),
+            archive_interval_sec=float(kwargs.get("archive_interval_sec", 30 * 60)),
         )
         return LogSessionResult(
             platform=self.platform,
