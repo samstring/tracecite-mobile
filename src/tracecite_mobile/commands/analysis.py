@@ -15,6 +15,7 @@ from tracecite_core.text_filter import (
     DEFAULT_TEMPLATE_THRESHOLD,
     FilterError,
     _safe_tag,
+    combine_patterns,
     filter_text,
     filter_texts,
     text_time_range,
@@ -24,7 +25,7 @@ from tracecite_core.text_filter import (
 from ..analysis.behavior_summary import summarize_behavior_file
 from ..analysis.knowledge import KnowledgeError, resolve_scenario_pattern
 from ..analysis.scenario import cmd_scenario
-from ..device.session import SessionError, load_all_sessions
+from ..device.session import SessionError, load_analysis_sessions
 from ..shared.config import ProfileError, load_project_profile
 from ..shared.command_run import CommandRun
 
@@ -54,13 +55,16 @@ def register_analysis_commands(sub: argparse._SubParsersAction) -> None:
         "--output-dir",
         help=f"配合 --from-sessions：日志目录，默认取 profile 或 {DEFAULT_LOG_OUTPUT_DIR}",
     )
-    pattern_group = filter_parser.add_mutually_exclusive_group(required=False)
-    pattern_group.add_argument("--grep", metavar="PATTERN", help="扩展正则（grep -E）")
-    pattern_group.add_argument(
+    filter_parser.add_argument(
+        "--grep",
+        metavar="PATTERN",
+        help="扩展正则（grep -E）；与 --preset 同时使用时按 OR 合并",
+    )
+    filter_parser.add_argument(
         "--preset",
         metavar="NAME",
         help=(
-            "预设关键词组合；未传 --grep/--preset 时使用 profile 的 "
+            "预设关键词组合；可与 --grep 按 OR 合并；两者均未传时使用 profile 的 "
             "default_filter_preset / default_filter_pattern"
         ),
     )
@@ -129,14 +133,26 @@ def register_analysis_commands(sub: argparse._SubParsersAction) -> None:
     scenario_sub = scenario_parser.add_subparsers(dest="scenario_command", required=True)
     scenario_run = scenario_sub.add_parser("run", help="执行 JSON/YAML 场景定义")
     scenario_run.add_argument("spec", help="场景定义文件路径")
+    scenario_run.add_argument(
+        "--base-dir",
+        help="场景 source 相对路径的解析根目录（默认使用场景文件所在目录）",
+    )
     scenario_run.add_argument("--json", action="store_true", help="以 JSON 输出结果")
     scenario_validate = scenario_sub.add_parser("validate", help="校验场景 schema 与扩展引用")
     scenario_validate.add_argument("spec", help="场景定义文件路径")
+    scenario_validate.add_argument(
+        "--base-dir",
+        help="场景 source 相对路径的解析根目录（默认使用场景文件所在目录）",
+    )
     scenario_validate.add_argument("--json", action="store_true", help="以 JSON 输出结果")
     scenario_explain = scenario_sub.add_parser(
         "explain", help="展示解析后的来源、格式、过滤、断言与交付计划"
     )
     scenario_explain.add_argument("spec", help="场景定义文件路径")
+    scenario_explain.add_argument(
+        "--base-dir",
+        help="场景 source 相对路径的解析根目录（默认使用场景文件所在目录）",
+    )
     scenario_explain.add_argument("--json", action="store_true", help="以 JSON 输出结果")
     scenario_verify = scenario_sub.add_parser(
         "verify", help="校验运行 manifest 中全部输入与产物的完整性"
@@ -319,6 +335,9 @@ def cmd_filter(args: argparse.Namespace) -> int:
             tag = args.tag or default_tag
             preset_name = args.preset
             pattern_source = f"preset:{args.preset}"
+            if args.grep:
+                pattern = combine_patterns(pattern, args.grep)
+                pattern_source += "+grep"
         elif args.grep:
             pattern, tag = args.grep, args.tag
             pattern_source = "grep"
@@ -344,7 +363,7 @@ def cmd_filter(args: argparse.Namespace) -> int:
                 base_pattern=pattern,
                 platform=platform,
             )
-            pattern_source = f"preset:{preset_name}+scenario:{scenario}"
+            pattern_source += f"+scenario:{scenario}"
 
         raw_paths = getattr(args, "log_path", None) or []
         if isinstance(raw_paths, (str, Path)):
@@ -353,7 +372,7 @@ def cmd_filter(args: argparse.Namespace) -> int:
         labels: list[str] = []
         if getattr(args, "from_sessions", False):
             log_dir = Path(args.output_dir).expanduser() if args.output_dir else profile.log_output_dir
-            sessions = load_all_sessions(log_dir)
+            sessions = load_analysis_sessions(log_dir, platform=platform)
             if not sessions:
                 raise FilterError("当前没有 session；无法使用 --from-sessions")
             for session in sessions.values():

@@ -30,6 +30,8 @@ def _hot_log_text() -> str:
 
 
 def _session(root: Path, *, udid: str, name: str, pid: int) -> session.StreamSession:
+    (root / f"ios_live_{name}.log").write_text("", encoding="utf-8")
+    (root / f"ios_live_{name}_session.log").write_text("collector\n", encoding="utf-8")
     return session.StreamSession(
         pid=pid,
         device_name=name,

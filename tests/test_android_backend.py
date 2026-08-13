@@ -9,6 +9,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from tracecite_mobile.platforms.base import RunResult
 from tracecite_mobile.platforms.android.adb import (
     AdbNoDeviceError,
@@ -73,6 +75,7 @@ class FakeAdb:
         self.devices_text = devices_text
         self.model = model
         self.perfetto_pid = perfetto_pid
+        self.perfetto_running = False
         self.app_pid = app_pid
         self.pulls: list[str] = []
         self.last_command: Optional[list[str]] = None
@@ -91,12 +94,15 @@ class FakeAdb:
         if "pidof" in args:
             target = args[-1]
             if target == "perfetto":
-                return RunResult(0, str(self.perfetto_pid), "")
+                return RunResult(
+                    0, str(self.perfetto_pid) if self.perfetto_running else "", ""
+                )
             if self.app_pid:
                 return RunResult(0, str(self.app_pid), "")
             return RunResult(0, "", "")
         # perfetto -d
         if "perfetto" in args and "-d" in args:
+            self.perfetto_running = True
             return RunResult(0, "started", "")
         # push / pull / kill / rm
         if "push" in args:
@@ -107,6 +113,8 @@ class FakeAdb:
             Path(local).write_bytes(b"PERFETTO_TRACE_BYTES")
             return RunResult(0, f"{local}: 1 file pulled.", "")
         if "kill" in args or "rm" in args:
+            if "kill" in args:
+                self.perfetto_running = False
             return RunResult(0, "", "")
         return RunResult(0, "", "")
 
@@ -219,6 +227,15 @@ def test_session_start_status_stop(tmp_path, monkeypatch):
     stopped = b.stop_session(output_dir=tmp_path)
     assert stopped["serial"] == "ABCDEF0123"
     assert not session_state_path(tmp_path).is_file()
+
+
+def test_corrupt_session_state_fails_closed(tmp_path):
+    path = session_state_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{broken", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="状态文件不可读"):
+        get_session_status(tmp_path)
 
 
 # ---------------- Perfetto 状态机 ----------------

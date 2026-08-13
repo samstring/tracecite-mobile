@@ -72,6 +72,9 @@ tracecite-mobile capture stop    # → 自动输出 trace 文件 + 卡顿摘要
 tracecite-mobile filter app.log --preset system-lifecycle --json
 tracecite-mobile filter app.log --preset network-http --json
 tracecite-mobile filter app.log --preset memory-leak --json
+
+# 保留通用 preset，同时补充本次事故关键词（按 OR 合并）
+tracecite-mobile filter app.log --preset network-http --grep 'checkout|payment' --json
 ```
 
 ## 相比直接丢日志给 AI
@@ -91,7 +94,14 @@ Core 提供了文本分析的引擎。Mobile 在此基础上加了四层：
 
 <img src="architecture.svg" alt="Mobile 架构：设备层、分析层、知识层、插件层，底层为 Core" width="100%"/>
 
-`--platform ios|android` 切换平台，所有命令跨平台通用。
+`--platform ios|android` 通过同一能力契约切换平台。可用
+`performance profiles` 查询当前平台的性能 profile；未声明的可选能力会明确失败，
+不会静默降级。
+
+```bash
+tracecite-mobile --platform ios performance profiles --json
+tracecite-mobile --platform android performance start --profile frame --json
+```
 
 ## 自定义流程
 
@@ -99,6 +109,7 @@ Core 提供了文本分析的引擎。Mobile 在此基础上加了四层：
 
 ```bash
 tracecite-mobile filter app.log --preset system-lifecycle --json
+tracecite-mobile filter app.log --preset network-http --grep 'checkout|payment' --json
 tracecite-mobile preset add --name my-preset --terms "支付失败, 网络超时, 订单异常"
 ```
 

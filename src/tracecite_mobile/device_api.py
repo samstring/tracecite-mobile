@@ -1,28 +1,27 @@
-# -*- coding: utf-8 -*-
-"""平台后端包的公共能力协议与稳定模型。"""
+"""Stable device-facing facade for Mobile extensions.
 
-from .base import (
+Company extensions should import device, backend, session, and profile contracts
+from this module instead of depending on Mobile's internal package layout.
+"""
+
+from .platforms.base import (
     AppCapability,
     ArchiveCapability,
     BackendError,
-    BaseBackend,
     CrashCapability,
     DeviceCapability,
     DiagnosticCapability,
     LogCapability,
     PerformanceCapability,
     PlatformBackend,
-    RunResult,
     UnsupportedCapabilityError,
 )
-from .models import (
+from .platforms.models import (
     ArchiveSegment,
     Capabilities,
-    CaptureResult,
     CrashEvent,
     CrashResult,
     DeviceRef,
-    EnvironmentStatus,
     DiagnosticResult,
     LogSessionResult,
     LogWindowResult,
@@ -34,25 +33,28 @@ from .models import (
     SessionRef,
     SessionStatus,
 )
+from .platforms.registry import get_backend
+from .shared.config import load_project_profile
+from .ui_api import ScreenCapability
 
 __all__ = [
     "AppCapability",
     "ArchiveCapability",
+    "ArchiveSegment",
     "BackendError",
-    "BaseBackend",
     "Capabilities",
-    "CaptureResult",
     "CrashCapability",
     "CrashEvent",
     "CrashResult",
     "DeviceCapability",
     "DeviceRef",
-    "EnvironmentStatus",
     "DiagnosticCapability",
     "DiagnosticResult",
+    "get_backend",
     "LogCapability",
     "LogSessionResult",
     "LogWindowResult",
+    "load_project_profile",
     "PerformanceCapability",
     "PerformanceProfile",
     "PerformanceResult",
@@ -60,7 +62,7 @@ __all__ = [
     "PerformanceStatus",
     "PlatformBackend",
     "ProcessRef",
-    "RunResult",
+    "ScreenCapability",
     "SessionRef",
     "SessionStatus",
     "UnsupportedCapabilityError",

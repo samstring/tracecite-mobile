@@ -4,7 +4,7 @@
 from __future__ import annotations
 
 import sys
-from typing import List, Optional
+from typing import List, Optional, Sequence
 
 from ..models import DeviceRef
 from .adb import (
@@ -77,7 +77,15 @@ def resolve_device(
             raise AdbDeviceNotFoundError(f"未找到名称包含 '{name}' 的设备")
         candidates = matched
 
-    # 未指定 serial/name 时：若多台里只有一台处于可用状态（device），直接选它，
+    # 显式 index 优先于自动挑选，避免 index=2 在一台可用设备场景下被忽略。
+    if index is not None and serial is None and name is None:
+        if 1 <= index <= len(candidates):
+            ref = candidates[index - 1]
+            _authorize_state(ref)
+            return ref
+        raise AdbDeviceNotFoundError(f"无效序号 {index}，可选范围 1-{len(candidates)}")
+
+    # 未指定 serial/name/index 时：若多台里只有一台处于可用状态（device），直接选它，
     # 避免对唯一可用设备还要手动选择；多台可用仍要求用户指定/选择。
     if serial is None and name is None and len(candidates) > 1:
         usable = [r for r in candidates if r.state == "device"]
@@ -107,6 +115,74 @@ def resolve_device(
         )
 
     return _prompt_choice(candidates)
+
+
+def resolve_devices(
+    client: AndroidAdbClient,
+    *,
+    serials: Optional[Sequence[str]] = None,
+    names: Optional[Sequence[str]] = None,
+    indices: Optional[Sequence[int]] = None,
+    all_devices: bool = False,
+    interactive: bool = True,
+) -> List[DeviceRef]:
+    """Resolve zero or more devices with deterministic serial/name/index rules."""
+
+    refs = list_devices(client)
+    if not refs:
+        raise AdbNoDeviceError(
+            "没有已连接的 Android 设备。\n"
+            "请确认：USB 调试已开启；设备已授权；adb devices -l 可见。"
+        )
+    if all_devices and any((serials, names, indices)):
+        raise AdbDeviceNotFoundError("all_devices 不能与 serial/name/index 同时使用。")
+    if all_devices:
+        selected = refs
+    elif serials:
+        selected = []
+        for serial in serials:
+            found = [ref for ref in refs if ref.identifier == serial]
+            if not found:
+                raise AdbDeviceNotFoundError(f"未找到 serial: {serial}")
+            selected.extend(found)
+    elif names:
+        selected = []
+        for name in names:
+            needle = str(name).lower()
+            found = [
+                ref
+                for ref in refs
+                if needle in (ref.name or "").lower()
+                or needle in (ref.identifier or "").lower()
+            ]
+            if not found:
+                raise AdbDeviceNotFoundError(f"未找到名称包含 '{name}' 的设备")
+            if len(found) > 1 and not interactive:
+                raise AdbDeviceNotFoundError(f"名称 '{name}' 匹配多台设备，请改用 serial。")
+            selected.append(found[0] if len(found) == 1 else _prompt_choice(found))
+    elif indices:
+        selected = []
+        for index in indices:
+            if index < 1 or index > len(refs):
+                raise AdbDeviceNotFoundError(f"无效序号 {index}，可选范围 1-{len(refs)}")
+            selected.append(refs[index - 1])
+    else:
+        selected = [
+            resolve_device(client, interactive=interactive)
+        ]
+
+    # Stable order is caller selection order, while all-device follows adb order.
+    out: List[DeviceRef] = []
+    seen = set()
+    for ref in selected:
+        if ref.identifier in seen:
+            continue
+        _authorize_state(ref)
+        seen.add(ref.identifier)
+        out.append(ref)
+    if not out:
+        raise AdbDeviceNotFoundError("没有选中的 Android 设备。")
+    return out
 
 
 def _prompt_choice(candidates: List[DeviceRef]) -> DeviceRef:

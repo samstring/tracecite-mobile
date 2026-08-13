@@ -7,6 +7,7 @@ from tracecite_mobile.analysis.scenario import run_scenario
 from tracecite_mobile.analysis.behavior_summary import summarize_behavior_text
 from tracecite_mobile.cli import main
 from tracecite_mobile.platforms.registry import available_platforms, get_backend
+from tracecite_mobile.platforms import Capabilities
 from tracecite_mobile.plugin_sdk import (
     AnalyzerPluginAPI,
     AssertionOutcome,
@@ -21,6 +22,9 @@ from tracecite_core.source import SourceResolution
 
 class _UnitBackend(BaseBackend):
     platform = "unit-platform"
+
+    def capabilities(self):
+        return Capabilities(platform=self.platform, device=True)
 
     def list_devices(self):
         return [
@@ -74,6 +78,7 @@ def test_behavior_parser_provider_is_project_neutral(tmp_path) -> None:
         )
 
     api.register_behavior_parser("unit-provider", parser, replace=True)
+    api.register_behavior_parser("unit-provider", parser)
     meta = tmp_path / ".tracecite"
     meta.mkdir()
     (meta / "knowledge.ios.json").write_text('{"markers": []}\n', encoding="utf-8")

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 from dataclasses import asdict, is_dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
-from tracecite_core.run import RunIntegrityError
 
 from ..shared.constants import (
     DEFAULT_CAPTURE_OUTPUT_DIR,
@@ -18,48 +19,17 @@ from ..shared.constants import (
     DEFAULT_RUN_OUTPUT_DIR,
 )
 
-from ..device.archive import (
-    ArchiveError,
-    list_archive_segments,
-    pull_archive_window,
-    rotate_hot_log,
-)
-from ..device.capture import CaptureError, get_capture_status, start_capture, stop_capture
-from ..device.devices import (
-    DeviceError,
-    ensure_process_running,
-    list_connected_devices,
-    resolve_device,
-    resolve_devices,
-)
-from ..device.session import (
-    SessionError,
-    get_stream_session_status,
-    load_all_sessions,
-    load_stream_session,
-    start_stream_session,
-    start_stream_sessions,
-    stop_stream_sessions,
-)
-from ..device.stream import StreamError, build_output_path, stream_logs
-from ..shared.config import ProfileError, load_project_profile
+from ..shared.config import load_project_profile
 from ..shared.command_run import CommandRun
+from ..platforms.base import BackendError, UnsupportedCapabilityError
+from ..platforms.registry import get_backend
+from ..platforms.models import (
+    Capabilities,
+    DeviceRef,
+)
 
 _DEFAULT_LOG_OUTPUT_DIR_STR = str(DEFAULT_LOG_OUTPUT_DIR)
 _DEFAULT_CAPTURE_OUTPUT_DIR_STR = str(DEFAULT_CAPTURE_OUTPUT_DIR)
-
-
-def _device_name_from_session_path(hot_path: Path, sessions) -> str:
-    """Resolve a hot-log owner from session metadata, with a generic fallback."""
-    resolved = hot_path.expanduser().resolve()
-    for session in sessions:
-        if Path(session.output_path).expanduser().resolve() == resolved:
-            return session.device_name
-    return hot_path.stem or "device"
-
-
-def _print_json(payload: Any) -> None:
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 def _json_ready(value: Any) -> Any:
@@ -122,33 +92,6 @@ def _finish_device_run(
     return result
 
 
-def _profile_from_cwd(args: argparse.Namespace | None = None):
-    return load_project_profile(
-        Path.cwd(), platform=getattr(args, "platform", "ios") or "ios"
-    )
-
-
-_PROFILE_SETUP_HINT = """\
-提示: 当前目录没有项目配置 `.tracecite/config.json`，正在使用内置默认（未绑定业务进程）。
-建议先配置本项目后再采集：
-  1) tracecite-mobile profile init
-  2) 编辑生成的 `.tracecite/config.json`，至少确认：
-     - process_name      # 进程名，默认空=采集全部进程；填你的 App 进程名
-     - subsystem         # 如 YourApp.debug.dylib；all=不过滤
-     - attach_process    # capture attach，通常同 process_name
-     - log_output_dir / capture_output_dir  # 必填输出目录
-  3) 排查知识在 `.tracecite/knowledge.<platform>.json`（grow …；目录已写入 .gitignore）
-  4) tracecite-mobile profile show / grow show
-"""
-
-
-def _warn_if_using_builtin_profile(profile, *, quiet: bool = False) -> None:
-    """无项目 profile 时优先提示用户配置（不阻断命令）。"""
-    if quiet or profile.source_path is not None:
-        return
-    print(_PROFILE_SETUP_HINT.rstrip(), file=sys.stderr)
-
-
 def _add_device_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--device", metavar="NAME", help="按设备名（模糊匹配）选择")
     parser.add_argument("-u", "--udid", metavar="UDID", help="按 UDID 选择设备")
@@ -191,6 +134,7 @@ def register_device_commands(sub: argparse._SubParsersAction) -> None:
     _add_device_args(stream_parser)
     stream_parser.add_argument("-o", "--output-file", metavar="PATH", help="指定输出文件路径")
     stream_parser.add_argument("--no-stdout", action="store_true", help="不镜像输出到终端，仅写文件")
+    stream_parser.add_argument("--json", action="store_true", help="以 JSON 输出结果")
     stream_parser.add_argument(
         "--hot-window-sec",
         type=int,
@@ -199,11 +143,15 @@ def register_device_commands(sub: argparse._SubParsersAction) -> None:
         help=f"hot 日志保留秒数，更早 rewind 到 .archive（默认取项目配置 hot_window_sec，否则 {DEFAULT_HOT_WINDOW_SEC}）",
     )
 
-    capture_parser = sub.add_parser("capture", help="Instruments 录制：start 开始 / stop 结束")
+    capture_parser = sub.add_parser(
+        "capture", help="性能采集兼容命令：start 开始 / stop 结束"
+    )
     capture_sub = capture_parser.add_subparsers(dest="capture_command", required=True)
 
     start_parser = capture_sub.add_parser("start", help="开始录制（后台运行）")
-    start_parser.add_argument("-t", "--template", help="Instruments 模板，默认取 profile")
+    start_parser.add_argument(
+        "-t", "--template", help="兼容别名；等价于 performance start --profile"
+    )
     start_parser.add_argument("--attach", help="attach 进程名，默认取 profile")
     start_parser.add_argument(
         "--launch",
@@ -211,7 +159,9 @@ def register_device_commands(sub: argparse._SubParsersAction) -> None:
         help="显式重启并 attach Bundle ID；未传时始终默认 attach 已在运行的 App",
     )
     start_parser.add_argument("--no-summarize", action="store_true", help="stop 时不做 hang 自动总结")
-    start_parser.add_argument("--prompt", action="store_true", help="允许 xctrace 弹出权限/确认对话框")
+    start_parser.add_argument(
+        "--prompt", action="store_true", help="允许平台采集器弹出权限或确认对话框"
+    )
     _add_capture_common_args(start_parser)
 
     stop_parser = capture_sub.add_parser("stop", help="结束录制并导出、总结")
@@ -220,6 +170,39 @@ def register_device_commands(sub: argparse._SubParsersAction) -> None:
 
     status_parser = capture_sub.add_parser("status", help="查看当前是否在录制")
     _add_capture_common_args(status_parser)
+
+    performance_parser = sub.add_parser(
+        "performance", help="性能 profile 采集：start / status / stop"
+    )
+    performance_sub = performance_parser.add_subparsers(
+        dest="performance_command", required=True
+    )
+
+    performance_profiles = performance_sub.add_parser(
+        "profiles", help="列出平台支持的性能 profile"
+    )
+    performance_profiles.add_argument("--json", action="store_true", help="以 JSON 输出")
+
+    performance_start = performance_sub.add_parser(
+        "start", help="按 profile 开始性能采集（后台运行）"
+    )
+    performance_start.add_argument("--profile", required=True, help="性能 profile 名称")
+    performance_start.add_argument("--attach", help="可选进程名")
+    performance_start.add_argument("--launch", metavar="APP", help="可选应用标识")
+    performance_start.add_argument("--prompt", action="store_true")
+    performance_start.add_argument("--no-summarize", action="store_true")
+    _add_capture_common_args(performance_start)
+
+    performance_stop = performance_sub.add_parser(
+        "stop", help="结束性能采集并导出结果"
+    )
+    performance_stop.add_argument("--no-summarize", action="store_true")
+    _add_capture_common_args(performance_stop)
+
+    performance_status = performance_sub.add_parser(
+        "status", help="查看性能采集状态"
+    )
+    _add_capture_common_args(performance_status)
 
     session_parser = sub.add_parser("session", help="后台日志 session 管理")
     session_sub = session_parser.add_subparsers(dest="session_command", required=True)
@@ -244,6 +227,10 @@ def register_device_commands(sub: argparse._SubParsersAction) -> None:
         metavar="SEC",
         help=f"hot 日志保留秒数（默认取项目配置 hot_window_sec，否则 {DEFAULT_HOT_WINDOW_SEC}）",
     )
+    session_start.add_argument(
+        "--output-dir",
+        help=f"日志输出目录，默认取 profile 或 {_DEFAULT_LOG_OUTPUT_DIR_STR}",
+    )
     session_start.add_argument("-d", "--date", action="store_true", help="文件名带时间戳")
     session_start.add_argument("-o", "--output-file", metavar="PATH", help="指定输出文件路径（仅单设备）")
     session_start.add_argument("--json", action="store_true", help="以 JSON 输出结果")
@@ -254,6 +241,12 @@ def register_device_commands(sub: argparse._SubParsersAction) -> None:
         help=f"日志输出目录，默认取 profile 或 {_DEFAULT_LOG_OUTPUT_DIR_STR}",
     )
     session_stop.add_argument("--udid", metavar="UDID", help="只停止指定 UDID 的 session")
+    session_stop.add_argument("--device", metavar="NAME", help="按设备名选择 session")
+    session_stop.add_argument("--index", type=int, metavar="N", help="按设备序号选择 session")
+    session_stop.add_argument("--indices", metavar="LIST", help="逗号分隔的设备序号，如 1,2")
+    session_stop.add_argument(
+        "--no-interactive", action="store_true", help="禁止交互式设备选择"
+    )
     session_stop.add_argument(
         "--all",
         action="store_true",
@@ -318,503 +311,6 @@ def register_device_commands(sub: argparse._SubParsersAction) -> None:
     archive_rotate.add_argument("--json", action="store_true", help="以 JSON 输出")
 
 
-def cmd_list(args: argparse.Namespace) -> int:
-    try:
-        devices = list_connected_devices()
-    except DeviceError as exc:
-        print(f"错误: {exc}", file=sys.stderr)
-        return 1
-
-    if args.json:
-        _print_json(
-            [
-                {"name": device.name, "udid": device.udid, "model": device.model}
-                for device in devices
-            ]
-        )
-        return 0
-
-    if not devices:
-        print("没有已连接的真机。")
-        return 1
-
-    print("已连接真机：\n")
-    for index, device in enumerate(devices, start=1):
-        print(device.display(index))
-    return 0
-
-
-def _resolve_hot_window_sec(args: argparse.Namespace, profile) -> int:
-    """hot 窗口解析优先级：命令行 --hot-window-sec > 项目配置 hot_window_sec > 默认。"""
-    cli_val = getattr(args, "hot_window_sec", None)
-    if cli_val is not None:
-        return max(60, int(cli_val))
-    profile_val = getattr(profile, "hot_window_sec", None)
-    if profile_val is not None:
-        return max(60, int(profile_val))
-    return DEFAULT_HOT_WINDOW_SEC
-
-
-def cmd_stream(args: argparse.Namespace) -> int:
-    command_run: Optional[CommandRun] = None
-    try:
-        platform = getattr(args, "platform", "ios")
-        profile = load_project_profile(Path.cwd(), platform=platform)
-        _warn_if_using_builtin_profile(profile)
-        device = resolve_device(
-            udid=args.udid,
-            name=args.device,
-            index=args.index,
-            interactive=not args.no_interactive,
-        )
-        output_dir = Path(args.output_dir).expanduser() if args.output_dir else profile.log_output_dir
-        output_path = build_output_path(
-            output_dir,
-            device,
-            args.date,
-            Path(args.output_file).expanduser() if args.output_file else None,
-        )
-        command_run = _new_device_run(
-            "stream",
-            platform=platform,
-            parameters={
-                "device_udid": device.udid,
-                "device_name": device.name,
-                "process_name": args.process_name or profile.process_name,
-                "subsystem": args.subsystem or profile.subsystem,
-                "output_path": str(output_path),
-            },
-        )
-        stream_logs(
-            device,
-            process_name=args.process_name or profile.process_name,
-            subsystem_filter=args.subsystem or profile.subsystem,
-            output_path=output_path,
-            also_stdout=not args.no_stdout,
-            hot_window_sec=_resolve_hot_window_sec(args, profile),
-        )
-        result = _finish_device_run(
-            command_run,
-            {"output_path": str(output_path), "device": device.name},
-            artifacts=((output_path, "device_log"),),
-        )
-        print(f"manifest: {result['manifest_path']}")
-        return 0
-    except (DeviceError, ProfileError, StreamError, RunIntegrityError, OSError) as exc:
-        failed = command_run.fail(exc) if command_run is not None else None
-        print(f"错误: {exc}", file=sys.stderr)
-        if failed:
-            print(f"manifest: {failed['manifest_path']}", file=sys.stderr)
-        return 1
-
-
-def _parse_indices(raw: Optional[str]) -> Optional[list[int]]:
-    if not raw:
-        return None
-    out: list[int] = []
-    for part in raw.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if not part.isdigit():
-            raise DeviceError(f"非法 --indices 项: {part!r}")
-        out.append(int(part))
-    return out or None
-
-
-def cmd_session(args: argparse.Namespace) -> int:
-    command_run: Optional[CommandRun] = None
-    try:
-        profile = _profile_from_cwd()
-        log_output_dir = Path(args.output_dir).expanduser() if getattr(args, "output_dir", None) else profile.log_output_dir
-
-        if args.session_command == "start":
-            _warn_if_using_builtin_profile(profile, quiet=bool(getattr(args, "json", False)))
-
-        if args.session_command == "status":
-            payload = get_stream_session_status(log_output_dir)
-            if args.json:
-                _print_json(payload)
-            elif not payload.get("sessions"):
-                print("当前没有进行中的日志 session。")
-            else:
-                print(f"日志 Session 状态（{payload['session_count']} 台）：")
-                for session in payload["sessions"]:
-                    print(f"  - {session['device_name']} ({session.get('device_model', '')})")
-                    if session.get("stalled"):
-                        state = "否（假存活/已停更，建议 session stop 后重开或直接 session start）"
-                    elif session["alive"]:
-                        state = "是"
-                    else:
-                        state = "否"
-                    print(f"      进行中: {state}")
-                    if session.get("process_alive") and session.get("stalled"):
-                        age = session.get("heartbeat_age_sec")
-                        age_s = f"{age}s" if age is not None else "无 heartbeat"
-                        print(f"      心跳:   停滞 ({age_s})")
-                    print(f"      PID:    {session['pid']}")
-                    print(f"      UDID:   {session['device_udid']}")
-                    print(f"      开始:   {session['started_at']}")
-                    print(f"      日志:   {session['output_path']}")
-                    print(f"      hot:    {session.get('hot_window_sec', DEFAULT_HOT_WINDOW_SEC)}s")
-                    if session.get("archive_dir"):
-                        print(f"      archive: {session['archive_dir']}")
-                if payload["capture"]:
-                    capture = payload["capture"]
-                    print(f"  Capture: 进行中（PID {capture['pid']}，模板 {capture['template']}）")
-            return 0
-
-        if args.session_command == "stop":
-            command_run = _new_device_run(
-                "session-stop",
-                platform=getattr(args, "platform", "ios") or "ios",
-                parameters={"output_dir": str(log_output_dir)},
-            )
-            stopped = stop_stream_sessions(
-                log_output_dir,
-                udid=getattr(args, "udid", None),
-                stop_all=bool(getattr(args, "stop_all", False)),
-            )
-            payload = {
-                "stopped": True,
-                "sessions": [s.to_dict() for s in stopped],
-            }
-            artifacts: list[tuple[Optional[Path | str], str]] = []
-            for session in stopped:
-                artifacts.extend(
-                    [
-                        (session.output_path, "device_log"),
-                        (session.stream_log_path, "collector_log"),
-                    ]
-                )
-            payload.update(
-                _finish_device_run(
-                    command_run,
-                    payload,
-                    artifacts=tuple(artifacts),
-                )
-            )
-            if args.json:
-                _print_json(payload)
-            else:
-                print(f"已停止 {len(stopped)} 个日志 session：")
-                for session in stopped:
-                    print(f"  - {session.device_name}: {session.output_path}")
-                print(f"manifest: {payload['manifest_path']}")
-            return 0
-
-        # start
-        indices = _parse_indices(getattr(args, "indices", None))
-        if getattr(args, "index", None) is not None:
-            indices = (indices or []) + [int(args.index)]
-        udids = [args.udid] if getattr(args, "udid", None) else None
-        devices = resolve_devices(
-            udids=udids,
-            name=args.device,
-            indices=indices,
-            all_devices=bool(getattr(args, "all_devices", False)),
-            interactive=not args.no_interactive,
-        )
-        hot_window = _resolve_hot_window_sec(args, profile)
-        platform = getattr(args, "platform", "ios") or "ios"
-        if len(devices) > 1 and getattr(args, "output_file", None):
-            raise SessionError("多设备 session start 不能使用 --output-file")
-        if len(devices) == 1:
-            command_run = _new_device_run(
-                "session-start",
-                platform=platform,
-                parameters={
-                    "output_dir": str(log_output_dir),
-                    "device_udids": [device.udid for device in devices],
-                    "hot_window_sec": hot_window,
-                },
-            )
-            sessions = [
-                start_stream_session(
-                    devices[0],
-                    profile,
-                    include_date=args.date,
-                    output_file=Path(args.output_file) if args.output_file else None,
-                    hot_window_sec=hot_window,
-                    platform=platform,
-                )
-            ]
-        else:
-            command_run = _new_device_run(
-                "session-start",
-                platform=platform,
-                parameters={
-                    "output_dir": str(log_output_dir),
-                    "device_udids": [device.udid for device in devices],
-                    "hot_window_sec": hot_window,
-                },
-            )
-            sessions = start_stream_sessions(
-                devices,
-                profile,
-                include_date=args.date,
-                hot_window_sec=hot_window,
-                platform=platform,
-            )
-        payload = {
-            "started": True,
-            "sessions": [s.to_dict() for s in sessions],
-        }
-        payload.update(_finish_device_run(command_run, payload))
-        if args.json:
-            _print_json(payload)
-        else:
-            print(f"日志 session 已启动（{len(sessions)} 台）：")
-            for session in sessions:
-                print(f"  - {session.device_name}: {session.output_path}")
-                print(f"    管理日志: {session.stream_log_path}")
-            print(f"manifest: {payload['manifest_path']}")
-        return 0
-    except (DeviceError, ProfileError, SessionError, RunIntegrityError, OSError) as exc:
-        failed = command_run.fail(exc) if command_run is not None else None
-        print(f"错误: {exc}", file=sys.stderr)
-        if failed:
-            print(f"manifest: {failed['manifest_path']}", file=sys.stderr)
-        return 1
-
-
-def cmd_archive(args: argparse.Namespace) -> int:
-    command_run: Optional[CommandRun] = None
-    try:
-        profile = _profile_from_cwd()
-        log_output_dir = (
-            Path(args.output_dir).expanduser()
-            if getattr(args, "output_dir", None)
-            else profile.log_output_dir
-        )
-
-        if args.archive_command == "list":
-            payload = list_archive_segments(
-                log_output_dir, device_name=getattr(args, "device", None)
-            )
-            if args.json:
-                _print_json(payload)
-            else:
-                devices = payload.get("devices") or {}
-                if not devices:
-                    print("尚无 archive 段。")
-                for name, info in devices.items():
-                    print(f"{name}: {info['segment_count']} 段 → {info['archive_dir']}")
-                    for seg in info.get("segments") or []:
-                        print(
-                            f"  - {seg['start']} → {seg['end']}  "
-                            f"({seg['lines']} lines)  {seg['path']}"
-                        )
-            return 0
-
-        if args.archive_command == "rotate":
-            hot = Path(args.hot_path).expanduser()
-            device_name = args.device or _device_name_from_session_path(
-                hot, load_all_sessions(log_output_dir).values()
-            )
-            command_run = _new_device_run(
-                "archive-rotate",
-                platform=getattr(args, "platform", "ios") or "ios",
-                parameters={
-                    "device_name": device_name,
-                    "hot_window_sec": _resolve_hot_window_sec(args, None),
-                },
-            )
-            command_run.freeze_input(hot, role="hot_log_before_rotate")
-            result = rotate_hot_log(
-                hot,
-                device_name=device_name,
-                hot_window_sec=_resolve_hot_window_sec(args, None),
-            )
-            payload = result.to_dict()
-            payload.update(
-                _finish_device_run(
-                    command_run,
-                    payload,
-                    artifacts=tuple(
-                        (segment.path, "archive_segment")
-                        for segment in result.archived
-                    ),
-                )
-            )
-            if args.json:
-                _print_json(payload)
-            else:
-                print(f"rotated: {result.rotated}")
-                print(f"hot: {result.hot_path} ({result.hot_lines} lines)")
-                for seg in result.archived:
-                    print(f"archived: {seg.path}")
-                print(f"manifest: {payload['manifest_path']}")
-            return 0
-
-        # pull
-        hot_path = Path(args.hot).expanduser() if getattr(args, "hot", None) else None
-        if hot_path is None:
-            for session in load_all_sessions(log_output_dir).values():
-                if args.device.lower() in session.device_name.lower():
-                    hot_path = Path(session.output_path)
-                    break
-        command_run = _new_device_run(
-            "archive-pull",
-            platform=getattr(args, "platform", "ios") or "ios",
-            parameters={
-                "device_name": args.device,
-                "since": args.since,
-                "until": args.until,
-            },
-        )
-        result = pull_archive_window(
-            log_output_dir,
-            device_name=args.device,
-            since=args.since,
-            until=args.until,
-            hot_path=hot_path,
-            output_path=Path(args.out).expanduser() if getattr(args, "out", None) else None,
-        )
-        for source in result.segments:
-            command_run.freeze_input(Path(source), role="archive_source_snapshot")
-        payload = result.to_dict()
-        payload.update(
-            _finish_device_run(
-                command_run,
-                payload,
-                artifacts=((result.output_path, "archive_pull"),),
-            )
-        )
-        if args.json:
-            _print_json(payload)
-        else:
-            print("archive pull 完成（内部文件，供 filter 使用）：")
-            print(f"  output_path: {result.output_path}")
-            print(f"  time: {result.time_from} → {result.time_to}")
-            print(f"  segments: {len(result.segments)}")
-            print(f"  lines: {result.lines}")
-            print(f"manifest: {payload['manifest_path']}")
-        return 0
-    except (ArchiveError, ProfileError, SessionError, RunIntegrityError, OSError) as exc:
-        failed = command_run.fail(exc) if command_run is not None else None
-        print(f"错误: {exc}", file=sys.stderr)
-        if failed:
-            print(f"manifest: {failed['manifest_path']}", file=sys.stderr)
-        return 1
-
-
-def cmd_capture(args: argparse.Namespace) -> int:
-    command_run: Optional[CommandRun] = None
-    try:
-        profile = _profile_from_cwd()
-        if args.capture_command == "start":
-            _warn_if_using_builtin_profile(profile, quiet=bool(getattr(args, "json", False)))
-        output_dir = Path(args.output_dir).expanduser() if args.output_dir else profile.capture_output_dir
-
-        if args.capture_command == "status":
-            payload = get_capture_status(output_dir)
-            if args.json:
-                _print_json(payload)
-            else:
-                if payload["session"] is None:
-                    print("当前没有进行中的 capture 录制。")
-                else:
-                    session = payload["session"]
-                    print("Capture 状态：")
-                    print(f"  进行中: {'是' if session['alive'] else '否（进程已结束，请 capture stop 收尾）'}")
-                    print(f"  PID:    {session['pid']}")
-                    print(f"  开始:   {session['started_at']}")
-                    print(f"  trace:  {session['trace_path']}")
-                    print(f"  模板:   {session['template']}")
-                    print(f"  Attach: {session['attach']}")
-            return 0
-
-        if args.capture_command == "stop":
-            command_run = _new_device_run(
-                "capture-stop",
-                platform=getattr(args, "platform", "ios") or "ios",
-                parameters={"output_dir": str(output_dir)},
-            )
-            # 联合分析指引必须指向真实 stream 输出，而非默认命名推测
-            stream_session = load_stream_session(profile.log_output_dir)
-            result = stop_capture(
-                output_dir,
-                summarize=not args.no_summarize,
-                quiet=args.json,
-                log_path=(
-                    Path(stream_session.output_path) if stream_session else None
-                ),
-            )
-            if result.log_path is not None and result.log_path.is_file():
-                command_run.freeze_input(result.log_path, role="context_log_snapshot")
-            payload = result.to_dict()
-            payload.update(
-                _finish_device_run(
-                    command_run,
-                    payload,
-                    artifacts=(
-                        (result.trace_path, "performance_trace"),
-                        (result.toc_path, "trace_toc"),
-                    ),
-                )
-            )
-            if args.json:
-                _print_json(payload)
-            else:
-                print(f"manifest: {payload['manifest_path']}")
-            return 0
-
-        if args.launch and args.attach:
-            print("错误: --launch 与 --attach 不能同时使用。", file=sys.stderr)
-            return 1
-
-        device = resolve_device(
-            udid=args.udid,
-            name=args.device,
-            index=args.index,
-            interactive=not args.no_interactive,
-        )
-        if args.launch is None:
-            ensure_process_running(device, args.attach or profile.attach_process)
-        command_run = _new_device_run(
-            "capture-start",
-            platform=getattr(args, "platform", "ios") or "ios",
-            parameters={
-                "device_udid": device.udid,
-                "device_name": device.name,
-                "template": args.template or profile.capture_template,
-                "attach": args.attach or profile.attach_process,
-                "launch": args.launch,
-                "output_dir": str(output_dir),
-            },
-        )
-        session = start_capture(
-            device,
-            template=args.template or profile.capture_template,
-            attach=args.attach or profile.attach_process,
-            launch=args.launch,
-            output_dir=output_dir,
-            no_prompt=not args.prompt,
-            no_summarize=args.no_summarize,
-            quiet=args.json,
-        )
-        payload = {
-            "active": True,
-            "session": {
-                **session.to_dict(),
-                "alive": True,
-            },
-        }
-        payload.update(_finish_device_run(command_run, payload))
-        if args.json:
-            _print_json(payload)
-        else:
-            print(f"manifest: {payload['manifest_path']}")
-        return 0
-    except (CaptureError, DeviceError, ProfileError, RunIntegrityError, OSError) as exc:
-        failed = command_run.fail(exc) if command_run is not None else None
-        print(f"错误: {exc}", file=sys.stderr)
-        if failed:
-            print(f"manifest: {failed['manifest_path']}", file=sys.stderr)
-        return 1
-
-
 def _print_backend_payload(payload: Any) -> None:
     """把插件后端返回的 dataclass / Path 转为稳定 JSON。"""
     print(json.dumps(_json_ready(payload), ensure_ascii=False, indent=2, default=str))
@@ -829,173 +325,724 @@ def _resolve_backend_device(backend: Any, args: argparse.Namespace):
     )
 
 
-def _dispatch_plugin_backend(args: argparse.Namespace) -> int:
-    """通过公开 PlatformBackend 协议驱动第三方平台。"""
-    from ..platforms.registry import get_backend
+def _parse_indices(raw: Optional[str]) -> Optional[list[int]]:
+    if not raw:
+        return None
+    indices: list[int] = []
+    for item in str(raw).split(","):
+        item = item.strip()
+        if not item:
+            continue
+        if not item.isdigit() or int(item) <= 0:
+            raise BackendError(f"非法 --indices 项: {item!r}")
+        indices.append(int(item))
+    return indices or None
 
-    backend = get_backend(args.platform)
+
+def _resolve_backend_devices(backend: Any, args: argparse.Namespace) -> list[Any]:
+    """Resolve every selector through the backend, including multi-device ones."""
+
+    indices = _parse_indices(getattr(args, "indices", None))
+    index = getattr(args, "index", None)
+    if index is not None:
+        indices = (indices or []) + [int(index)]
+    udids = [args.udid] if getattr(args, "udid", None) else None
+    return backend.resolve_devices(
+        udids=udids,
+        name=getattr(args, "device", None),
+        indices=indices,
+        all_devices=bool(getattr(args, "all_devices", False)),
+        interactive=not getattr(args, "no_interactive", False),
+    )
+
+
+def _backend_capabilities(backend: Any) -> Capabilities:
+    """Read capabilities once per command and reject legacy backends explicitly."""
+
+    capabilities = backend.capabilities()
+    if not isinstance(capabilities, Capabilities):
+        raise BackendError(
+            f"平台 {getattr(backend, 'platform', '?')!r} 返回了无效 capabilities；"
+            "请升级到 PlatformBackend 能力协议"
+        )
+    return capabilities
+
+
+def _require_capability(
+    backend: Any, capabilities: Capabilities, field: str, operation: str
+) -> None:
+    if not bool(getattr(capabilities, field, False)):
+        raise UnsupportedCapabilityError(f"{operation}（{field}）")
+
+
+def _require_method(backend: Any, name: str, operation: str):
+    method = getattr(backend, name, None)
+    if not callable(method):
+        raise BackendError(
+            f"平台 {getattr(backend, 'platform', '?')!r} 未实现 {operation}；"
+            f"请迁移到 PlatformBackend.{name}"
+        )
+    return method
+
+
+def _backend_output_path(
+    output_dir: Path,
+    device: DeviceRef,
+    *,
+    include_date: bool = False,
+    output_file: Optional[Path] = None,
+) -> Path:
+    """Build a stable path without importing an iOS/Android path helper."""
+
+    if output_file is not None:
+        output_file = Path(output_file).expanduser()
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        return output_file
+    identity = device.name if device.platform == "ios" else device.identifier
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", identity or device.name).strip("_")
+    stamp = f"_{datetime.now().strftime('%Y%m%d_%H%M%S')}" if include_date else ""
+    output_dir = Path(output_dir).expanduser()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if device.platform == "ios":
+        filename = f"ios_live_{safe}{stamp}.log"
+    elif device.platform == "android":
+        filename = f"android_live_{safe}{stamp}.log"
+    else:
+        filename = f"tracecite_{device.platform}_{safe}{stamp}.log"
+    return output_dir / filename
+
+
+def _profile_for_backend(platform: str):
+    return load_project_profile(Path.cwd(), platform=platform)
+
+
+def _profile_package(profile: Any) -> str:
+    return str(
+        getattr(profile, "package_name", "")
+        or getattr(profile, "process_name", "")
+        or ""
+    )
+
+
+def _session_payload(result: Any, *, started: Optional[bool] = None) -> dict[str, Any]:
+    ready = _json_ready(result)
+    if isinstance(ready, dict):
+        payload = dict(ready)
+    else:
+        payload = {"result": ready}
+    if started is not None:
+        payload.setdefault("started", started)
+    sessions = payload.get("sessions")
+    if isinstance(sessions, list):
+        flattened = []
+        for session in sessions:
+            if not isinstance(session, dict):
+                flattened.append(session)
+                continue
+            item = dict(session)
+            metadata = item.get("metadata")
+            if isinstance(metadata, dict):
+                for key, value in metadata.items():
+                    item.setdefault(str(key), value)
+            device = item.get("device")
+            if isinstance(device, dict):
+                item.setdefault("device_name", device.get("name", ""))
+                item.setdefault(
+                    "device_udid", device.get("identifier", device.get("udid", ""))
+                )
+                item.setdefault("device_model", device.get("model", ""))
+            flattened.append(item)
+        payload["sessions"] = flattened
+        sessions = flattened
+        payload.setdefault("session_count", len(sessions))
+        if len(sessions) == 1:
+            payload.setdefault("session", sessions[0])
+    return payload
+
+
+def _performance_payload(result: Any, *, active: Optional[bool] = None) -> dict[str, Any]:
+    ready = _json_ready(result)
+    payload = dict(ready) if isinstance(ready, dict) else {"result": ready}
+    if active is not None:
+        payload.setdefault("active", active)
+    if isinstance(payload.get("session"), dict):
+        payload["session"].setdefault("alive", bool(active))
+    return payload
+
+
+def _flatten_device_compatibility(payload: dict[str, Any]) -> dict[str, Any]:
+    """Add legacy top-level device keys while retaining stable nested models."""
+
+    device = payload.get("device")
+    if isinstance(device, dict):
+        identifier = device.get("identifier", device.get("udid", ""))
+        payload.setdefault("device_udid", identifier)
+        payload.setdefault("device_name", device.get("name", ""))
+        payload.setdefault("model", device.get("model", ""))
+        if device.get("platform") == "android":
+            payload.setdefault("serial", identifier)
+    return payload
+
+
+def _canonical_performance_profile(
+    capabilities: Capabilities, requested: str
+) -> str:
+    """Map a historical template alias to a public profile name."""
+
+    name = str(requested)
+    if name in capabilities.performance_profiles:
+        return name
+    options = capabilities.platform_options.get("performance_profiles", {})
+    if isinstance(options, dict):
+        for public_name, alias in options.items():
+            if name == alias:
+                return str(public_name)
+    # Android's first-generation config used perfetto-* names; the backend
+    # advertises the corresponding public profile names in capabilities.
+    if name.startswith("perfetto-") and name.removeprefix("perfetto-") in capabilities.performance_profiles:
+        return name.removeprefix("perfetto-")
+    return name
+
+
+def _backend_archive_device(backend: Any, args: argparse.Namespace):
+    # Archive owners may be offline; the backend receives the stable selector
+    # as a name/UDID instead of forcing a live device lookup.
+    name = getattr(args, "device", None)
+    udid = getattr(args, "udid", None)
+    if not name and not udid:
+        return None
+    identifier = str(udid or name)
+    return DeviceRef(
+        platform=str(getattr(backend, "platform", "")),
+        identifier=identifier,
+        name=str(name or identifier),
+    )
+
+
+def _dispatch_backend(args: argparse.Namespace) -> int:
+    """统一通过 PlatformBackend 驱动 iOS、Android 和第三方平台。"""
+
+    platform = str(getattr(args, "platform", "ios") or "ios")
     command = args.command
     command_run: Optional[CommandRun] = None
     try:
+        backend = get_backend(platform)
+        capabilities = _backend_capabilities(backend)
         if command == "list":
-            devices = backend.list_devices()
+            _require_capability(backend, capabilities, "device", "device.list")
+            devices = _require_method(backend, "list_devices", "device.list")()
             if args.json:
-                _print_backend_payload(devices)
+                if platform == "ios":
+                    payload = [
+                        {
+                            "name": device.name,
+                            "udid": device.identifier,
+                            "model": device.model,
+                        }
+                        for device in devices
+                    ]
+                elif platform == "android":
+                    payload = [
+                        {
+                            "platform": "android",
+                            "serial": device.identifier,
+                            "name": device.name,
+                            "model": device.model,
+                            "state": device.state,
+                        }
+                        for device in devices
+                    ]
+                else:
+                    payload = _json_ready(devices)
+                _print_backend_payload(payload)
+            elif not devices:
+                print("没有已连接的设备。")
+                return 1
             else:
+                print("已连接设备：\n")
                 for index, device in enumerate(devices, 1):
                     print(device.display(index))
             return 0
 
         if command == "stream":
+            _require_capability(backend, capabilities, "log", "log.stream")
+            profile = _profile_for_backend(platform)
             device = _resolve_backend_device(backend, args)
-            output_dir = Path(args.output_dir).expanduser() if args.output_dir else DEFAULT_LOG_OUTPUT_DIR / args.platform
-            output_path = build_output_path(
+            output_dir = (
+                Path(args.output_dir).expanduser()
+                if args.output_dir
+                else profile.log_output_dir
+            )
+            output_path = _backend_output_path(
                 output_dir,
                 device,
-                bool(args.date),
-                Path(args.output_file).expanduser() if args.output_file else None,
+                include_date=bool(args.date),
+                output_file=Path(args.output_file).expanduser()
+                if args.output_file
+                else None,
             )
             command_run = _new_device_run(
                 "stream",
-                platform=args.platform,
-                parameters={"output_path": str(output_path)},
+                platform=platform,
+                run_root=_run_root_for_output(output_dir),
+                parameters={
+                    "device_udid": device.identifier,
+                    "device_name": device.name,
+                    "output_path": str(output_path),
+                },
             )
-            result = backend.stream_logs(
+            result = _require_method(backend, "stream_logs", "log.stream")(
                 device,
-                package=args.process_name or "",
+                package=args.process_name or _profile_package(profile),
                 output_path=output_path,
                 also_stdout=not args.no_stdout,
-                subsystem=args.subsystem or "all",
+                subsystem=args.subsystem or getattr(profile, "subsystem", "all"),
             )
             payload = _finish_device_run(
                 command_run,
-                result,
+                _json_ready(result),
                 artifacts=((output_path, "device_log"),),
             )
-            _print_backend_payload(payload)
+            if getattr(args, "json", False):
+                _print_backend_payload(payload)
+            else:
+                print(f"日志采集完成: {output_path}")
+                print(f"manifest: {payload['manifest_path']}")
             return 0
 
         if command == "session":
-            output_dir = Path(args.output_dir).expanduser() if getattr(args, "output_dir", None) else DEFAULT_LOG_OUTPUT_DIR / args.platform
-            if args.session_command == "status":
-                result = backend.get_session_status(output_dir=output_dir)
-            elif args.session_command == "stop":
-                command_run = _new_device_run(
-                    "session-stop",
-                    platform=args.platform,
-                    parameters={"output_dir": str(output_dir)},
+            _require_capability(backend, capabilities, "log", "log.session")
+            profile = _profile_for_backend(platform)
+            output_dir = (
+                Path(args.output_dir).expanduser()
+                if getattr(args, "output_dir", None)
+                else profile.log_output_dir
+            )
+            subcommand = args.session_command
+            if subcommand == "status":
+                result = _require_method(backend, "list_sessions", "log.list_sessions")(
+                    output_dir=output_dir
                 )
-                result = backend.stop_session(output_dir=output_dir)
-            elif args.session_command == "start":
-                if getattr(args, "all_devices", False) or getattr(args, "indices", None):
-                    raise ValueError("第三方平台 session 暂不支持 --all / --indices")
-                device = _resolve_backend_device(backend, args)
-                command_run = _new_device_run(
-                    "session-start",
-                    platform=args.platform,
-                    parameters={"output_dir": str(output_dir)},
+                payload = _session_payload(result)
+                if args.json:
+                    _print_backend_payload(payload)
+                else:
+                    sessions = payload.get("sessions") or []
+                    print(f"日志 Session 状态（{len(sessions)} 台）：")
+                    for session in sessions:
+                        print(
+                            f"  - {session.get('device', {}).get('name', session.get('device_name', ''))}: "
+                            f"{session.get('state', 'unknown')}"
+                        )
+                return 0
+
+            selected_devices = None
+            if subcommand == "start":
+                selected_devices = _resolve_backend_devices(backend, args)
+                if len(selected_devices) > 1 and not capabilities.multi_device_session:
+                    raise UnsupportedCapabilityError("log.multi_device_session")
+                if len(selected_devices) > 1 and getattr(args, "output_file", None):
+                    raise BackendError("多设备 session start 不能使用 --output-file")
+            elif subcommand == "stop":
+                has_selector = any(
+                    getattr(args, name, None) is not None
+                    for name in ("udid", "device", "index", "indices")
                 )
-                result = backend.start_session(
-                    device,
+                if has_selector:
+                    # A stopped device need not still be connected.  A bare UDID
+                    # is already a stable DeviceRef; name/index selectors still
+                    # require live backend resolution.
+                    if (
+                        getattr(args, "udid", None)
+                        and not getattr(args, "device", None)
+                        and getattr(args, "index", None) is None
+                        and not getattr(args, "indices", None)
+                    ):
+                        selected_devices = [
+                            DeviceRef(
+                                platform=platform,
+                                identifier=str(args.udid),
+                                name=str(args.udid),
+                            )
+                        ]
+                    else:
+                        selected_devices = _resolve_backend_devices(backend, args)
+                    if len(selected_devices) > 1 and not capabilities.multi_device_session:
+                        raise UnsupportedCapabilityError("log.multi_device_session")
+                elif getattr(args, "stop_all", False) and not capabilities.multi_device_session:
+                    raise UnsupportedCapabilityError("log.multi_device_session")
+            else:
+                raise BackendError(f"未知 session 子命令: {subcommand}")
+
+            operation = f"session-{subcommand}"
+            command_run = _new_device_run(
+                operation,
+                platform=platform,
+                run_root=_run_root_for_output(output_dir),
+                parameters={
+                    "output_dir": str(output_dir),
+                    "device_udids": [d.identifier for d in selected_devices or []],
+                    "all_devices": bool(getattr(args, "all_devices", False)
+                                         or getattr(args, "stop_all", False)),
+                },
+            )
+            if subcommand == "start":
+                result = _require_method(backend, "start_sessions", "log.start_sessions")(
+                    selected_devices or [],
+                    package=_profile_package(profile),
                     output_dir=output_dir,
-                    include_date=bool(args.date),
-                    output_file=(
-                        Path(args.output_file).expanduser() if args.output_file else None
+                    include_date=bool(getattr(args, "date", False)),
+                    output_file=Path(args.output_file).expanduser()
+                    if getattr(args, "output_file", None)
+                    else None,
+                    hot_window_sec=getattr(args, "hot_window_sec", None),
+                )
+                payload = _session_payload(result, started=True)
+            else:
+                result = _require_method(backend, "stop_sessions", "log.stop_sessions")(
+                    devices=selected_devices,
+                    all_devices=bool(getattr(args, "stop_all", False)),
+                    output_dir=output_dir,
+                )
+                payload = _session_payload(result, started=False)
+                payload["stopped"] = True
+            artifacts: list[tuple[Optional[Path | str], str]] = []
+            if subcommand == "start":
+                # Both logs are live writers at session start.  Registering
+                # their current size/hash would make a passed manifest
+                # unverifiable as soon as the collector receives another
+                # record.  They are intentionally delivered by session-stop,
+                # after the backend has confirmed the collector exited and the
+                # files are stable.
+                payload.setdefault("warnings", []).append(
+                    "session start manifest omits live device/collector logs; "
+                    "they are registered after a successful session stop"
+                )
+            else:
+                for session in payload.get("sessions") or []:
+                    if isinstance(session, dict):
+                        artifacts.append((session.get("output_path"), "device_log"))
+                        artifacts.append((session.get("stream_log_path"), "collector_log"))
+            payload.update(_finish_device_run(command_run, payload, artifacts=tuple(artifacts)))
+            if args.json:
+                _print_backend_payload(payload)
+            else:
+                print(
+                    f"日志 session {'已启动' if subcommand == 'start' else '已停止'} "
+                    f"（{len(payload.get('sessions') or [])} 台）。"
+                )
+                print(f"manifest: {payload['manifest_path']}")
+            return 0
+
+        if command in {"performance", "capture"}:
+            subcommand = (
+                args.performance_command
+                if command == "performance"
+                else args.capture_command
+            )
+            _require_capability(backend, capabilities, "performance", "performance")
+            if subcommand == "profiles":
+                profiles = _require_method(
+                    backend,
+                    "list_performance_profiles",
+                    "performance.profiles",
+                )()
+                if args.json:
+                    _print_backend_payload(profiles)
+                else:
+                    for item in profiles:
+                        print(f"{item.name}: {item.description}".rstrip())
+                return 0
+            profile = _profile_for_backend(platform)
+            output_dir = (
+                Path(args.output_dir).expanduser()
+                if args.output_dir
+                else profile.capture_output_dir
+            )
+            if subcommand == "status":
+                result = _require_method(
+                    backend, "get_performance_status", "performance.status"
+                )(output_dir=output_dir)
+                payload = _performance_payload(result)
+                if command == "capture":
+                    # Keep the historical capture status envelope while the
+                    # public performance command uses the stable status model.
+                    session = payload.get("session")
+                    payload.setdefault("active", payload.get("state") in {"running", "active"})
+                    if isinstance(session, dict):
+                        for key, value in session.items():
+                            payload.setdefault(key, value)
+                        payload.setdefault("template", session.get("profile"))
+                    _flatten_device_compatibility(payload)
+                if args.json:
+                    _print_backend_payload(payload)
+                else:
+                    print(f"性能采集状态: {payload.get('state', 'unknown')}")
+                return 0
+            command_run = _new_device_run(
+                f"{command}-{subcommand}",
+                platform=platform,
+                run_root=_run_root_for_output(output_dir),
+                parameters={"output_dir": str(output_dir)},
+            )
+            if subcommand == "start":
+                if getattr(args, "attach", None) and getattr(args, "launch", None):
+                    raise BackendError("--attach 与 --launch 不能同时使用")
+                device = _resolve_backend_device(backend, args)
+                requested_profile = (
+                    getattr(args, "profile", None)
+                    or getattr(args, "template", None)
+                    or getattr(profile, "capture_template", None)
+                    or "default"
+                )
+                if command == "capture":
+                    requested_profile = _canonical_performance_profile(
+                        capabilities, requested_profile
+                    )
+                result = _require_method(
+                    backend, "start_performance", "performance.start"
+                )(
+                    device,
+                    profile=requested_profile,
+                    output_dir=output_dir,
+                    attach=getattr(args, "attach", None),
+                    launch=getattr(args, "launch", None),
+                    prompt=bool(getattr(args, "prompt", False)),
+                    no_summarize=bool(getattr(args, "no_summarize", False)),
+                )
+                payload = _performance_payload(result, active=True)
+            elif subcommand == "stop":
+                context_log_path: Optional[Path] = None
+                if capabilities.log:
+                    try:
+                        status = _require_method(
+                            backend, "list_sessions", "log.list_sessions"
+                        )(output_dir=Path(profile.log_output_dir))
+                        status_ready = _json_ready(status)
+                        status_items = (
+                            status_ready.get("sessions", [])
+                            if isinstance(status_ready, dict)
+                            else []
+                        )
+                        for item in status_items:
+                            candidate = (
+                                item.get("output_path")
+                                if isinstance(item, dict)
+                                else None
+                            )
+                            if candidate and Path(candidate).is_file():
+                                context_log_path = Path(candidate)
+                                command_run.freeze_input(
+                                    context_log_path, role="context_log_snapshot"
+                                )
+                                break
+                    except Exception:
+                        # Performance stop remains valid when log status is
+                        # unavailable; the backend itself decides whether the
+                        # optional context is required.
+                        context_log_path = None
+                result = _require_method(
+                    backend, "stop_performance", "performance.stop"
+                )(
+                    output_dir=output_dir,
+                    context_log_path=context_log_path,
+                    no_summarize=bool(getattr(args, "no_summarize", False)),
+                )
+                payload = _performance_payload(result, active=False)
+                if command == "capture" and payload.get("context_path"):
+                    payload.setdefault("log_path", payload["context_path"])
+            else:
+                raise BackendError(f"未知 performance 子命令: {subcommand}")
+            if command == "capture" and subcommand == "start":
+                legacy_session = dict(payload)
+                legacy_session.pop("active", None)
+                legacy_session["alive"] = True
+                legacy_session.setdefault("template", requested_profile)
+                if legacy_session.get("output_path"):
+                    legacy_session.setdefault("local_trace_path", legacy_session["output_path"])
+                    legacy_session.setdefault("trace_path", legacy_session["output_path"])
+                _flatten_device_compatibility(legacy_session)
+                payload = {
+                    "active": True,
+                    "session": legacy_session,
+                    "platform": platform,
+                }
+            _flatten_device_compatibility(payload)
+            trace_path = payload.get("trace_path") or payload.get("output_path")
+            artifact_items: list[tuple[Optional[Path | str], str]] = []
+            if subcommand == "stop":
+                artifact_items.append((trace_path, "performance_trace"))
+            metadata_role = "trace_metadata" if command == "capture" else "performance_metadata"
+            summary_role = "capture_summary" if command == "capture" else "performance_summary"
+            artifact_items.extend(
+                [
+                    (payload.get("metadata_path"), metadata_role),
+                    (payload.get("summary_path"), summary_role),
+                ]
+            )
+            payload.update(
+                _finish_device_run(
+                    command_run,
+                    payload,
+                    artifacts=tuple(artifact_items),
+                )
+            )
+            if args.json:
+                _print_backend_payload(payload)
+            else:
+                print(
+                    f"性能采集{'已启动' if subcommand == 'start' else '已停止'}。"
+                )
+                print(f"manifest: {payload['manifest_path']}")
+            return 0
+
+        if command == "archive":
+            profile = _profile_for_backend(platform)
+            output_dir = (
+                Path(args.output_dir).expanduser()
+                if getattr(args, "output_dir", None)
+                else profile.log_output_dir
+            )
+            subcommand = args.archive_command
+            if subcommand in {"list", "pull"}:
+                _require_capability(backend, capabilities, "archive", "archive")
+            if subcommand == "list":
+                device = _backend_archive_device(backend, args)
+                segments = _require_method(
+                    backend, "list_archive_segments", "archive.list_archive_segments"
+                )(
+                    device=device,
+                    device_name=getattr(args, "device", None),
+                    output_dir=output_dir,
+                )
+                ready_segments = _json_ready(segments)
+                grouped: dict[str, dict[str, Any]] = {}
+                for segment in ready_segments:
+                    if not isinstance(segment, dict):
+                        continue
+                    device_info = segment.get("device")
+                    device_name = (
+                        device_info.get("name")
+                        if isinstance(device_info, dict)
+                        else None
+                    ) or getattr(args, "device", None) or "device"
+                    group = grouped.setdefault(
+                        str(device_name),
+                        {"segment_count": 0, "segments": [], "archive_dir": ""},
+                    )
+                    group["segments"].append(segment)
+                    group["segment_count"] += 1
+                    if not group["archive_dir"]:
+                        path = str(segment.get("path") or "")
+                        group["archive_dir"] = str(Path(path).parent) if path else ""
+                payload = {
+                    "segments": ready_segments,
+                    "segment_count": len(segments),
+                }
+                if grouped:
+                    payload["devices"] = grouped
+                if args.json:
+                    _print_backend_payload(payload)
+                else:
+                    for segment in payload["segments"]:
+                        print(
+                            f"{segment.get('start', '')} → {segment.get('end', '')} "
+                            f"{segment.get('path', '')}"
+                        )
+                return 0
+            if subcommand == "pull":
+                _require_capability(backend, capabilities, "log_window", "archive.fetch_log_window")
+                device = _backend_archive_device(backend, args)
+                command_run = _new_device_run(
+                    "archive-pull",
+                    platform=platform,
+                    run_root=_run_root_for_output(output_dir),
+                    parameters={
+                        "device": getattr(args, "device", None),
+                        "since": args.since,
+                        "until": args.until,
+                    },
+                )
+                result = _require_method(
+                    backend, "fetch_log_window", "archive.fetch_log_window"
+                )(
+                    device=device,
+                    device_name=getattr(args, "device", None),
+                    time_from=args.since,
+                    time_to=args.until,
+                    output_dir=output_dir,
+                    log_output_dir=output_dir,
+                    hot_path=Path(args.hot).expanduser()
+                    if getattr(args, "hot", None)
+                    else None,
+                    output_path=Path(args.out).expanduser()
+                    if getattr(args, "out", None)
+                    else None,
+                )
+                payload = _json_ready(result)
+                payload = _finish_device_run(
+                    command_run,
+                    payload,
+                    artifacts=((payload.get("output_path"), "archive_pull"),),
+                )
+            elif subcommand == "rotate":
+                _require_capability(backend, capabilities, "archive", "archive")
+                rotate = getattr(backend, "rotate_log", None)
+                if not callable(rotate):
+                    raise UnsupportedCapabilityError("archive.rotate_log")
+                device = _backend_archive_device(backend, args)
+                hot_path = Path(args.hot_path).expanduser()
+                command_run = _new_device_run(
+                    "archive-rotate",
+                    platform=platform,
+                    run_root=_run_root_for_output(hot_path.parent),
+                    parameters={"hot_path": str(hot_path)},
+                )
+                result = rotate(
+                    hot_path=hot_path,
+                    device=device,
+                    device_name=getattr(args, "device", None),
+                    hot_window_sec=getattr(args, "hot_window_sec", None),
+                )
+                payload = _json_ready(result)
+                payload = _finish_device_run(
+                    command_run,
+                    payload,
+                    artifacts=tuple(
+                        (item.get("path"), "archive_segment")
+                        for item in payload.get("archived", [])
+                        if isinstance(item, dict)
                     ),
                 )
             else:
-                raise ValueError(f"未知 session 子命令: {args.session_command}")
-            if command_run is not None:
-                ready = _json_ready(result)
-                output_path = ready.get("output_path") if isinstance(ready, dict) else None
-                result = _finish_device_run(
-                    command_run,
-                    ready,
-                    artifacts=(
-                        ((output_path if args.session_command == "stop" else None), "device_log"),
-                    ),
-                )
-            _print_backend_payload(result)
-            return 0
-
-        if command == "capture":
-            output_dir = Path(args.output_dir).expanduser() if args.output_dir else DEFAULT_CAPTURE_OUTPUT_DIR / args.platform
-            if args.capture_command == "status":
-                result = backend.get_capture_status(output_dir=output_dir)
-            elif args.capture_command == "stop":
-                command_run = _new_device_run(
-                    "capture-stop",
-                    platform=args.platform,
-                    parameters={"output_dir": str(output_dir)},
-                )
-                result = backend.stop_capture(output_dir=output_dir)
-            elif args.capture_command == "start":
-                device = _resolve_backend_device(backend, args)
-                command_run = _new_device_run(
-                    "capture-start",
-                    platform=args.platform,
-                    parameters={"output_dir": str(output_dir)},
-                )
-                result = backend.start_capture(
-                    device,
-                    template=args.template or "default",
-                    output_dir=output_dir,
-                    attach=args.attach,
-                    launch=args.launch,
-                    prompt=args.prompt,
-                    no_summarize=args.no_summarize,
-                )
+                raise BackendError(f"未知 archive 子命令: {subcommand}")
+            if args.json:
+                _print_backend_payload(payload)
             else:
-                raise ValueError(f"未知 capture 子命令: {args.capture_command}")
-            if command_run is not None:
-                ready = _json_ready(result)
-                trace_path = ready.get("trace_path") if isinstance(ready, dict) else None
-                metadata_path = ready.get("metadata_path") if isinstance(ready, dict) else None
-                result = _finish_device_run(
-                    command_run,
-                    ready,
-                    artifacts=(
-                        ((trace_path if args.capture_command == "stop" else None), "performance_trace"),
-                        ((metadata_path if args.capture_command == "stop" else None), "trace_metadata"),
-                    ),
-                )
-            _print_backend_payload(result)
+                print(f"archive {subcommand} 完成。")
+                if command_run is not None:
+                    print(f"manifest: {payload['manifest_path']}")
             return 0
 
-        raise ValueError(
-            f"第三方平台 {args.platform!r} 不支持命令 {command!r} 的当前子命令"
-        )
-    except Exception as exc:  # 插件异常统一转为 CLI 错误，不泄漏 traceback
+        return None  # type: ignore[return-value]
+    except Exception as exc:  # noqa: BLE001 - public CLI must not leak traceback
         failed = command_run.fail(exc) if command_run is not None else None
-        print(f"错误: 平台插件 {args.platform!r}: {exc}", file=sys.stderr)
+        print(f"错误: 平台 {platform!r}: {exc}", file=sys.stderr)
         if failed:
             print(f"manifest: {failed['manifest_path']}", file=sys.stderr)
         return 1
 
 
 def dispatch_device_command(args: argparse.Namespace) -> Optional[int]:
-    """按平台和命令分派设备域处理器。"""
-    platform = getattr(args, "platform", "ios")
-    if platform not in {"ios", "android"} and args.command in {
+    """设备域统一入口；所有平台都经过公开 PlatformBackend。"""
+
+    if getattr(args, "command", None) in {
         "list",
         "stream",
         "session",
         "capture",
+        "performance",
         "archive",
     }:
-        return _dispatch_plugin_backend(args)
-    if platform == "android":
-        if args.command in {"list", "stream", "session", "capture"}:
-            from ..platforms.android.cli_handlers import android_dispatch
-
-            return android_dispatch(args)
-
-    handlers = {
-        "list": cmd_list,
-        "stream": cmd_stream,
-        "capture": cmd_capture,
-        "session": cmd_session,
-        "archive": cmd_archive,
-    }
-    handler = handlers.get(args.command)
-    return None if handler is None else handler(args)
+        return _dispatch_backend(args)
+    return None

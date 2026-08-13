@@ -35,6 +35,16 @@ class SessionError(RuntimeError):
     pass
 
 
+# Stopping a session happens in a new CLI process, so the collector is usually
+# not this process' child and ``waitpid`` cannot be used as the completion
+# signal.  Keep the polling bounded and explicit instead.
+SESSION_STOP_TIMEOUT_SEC = 10.0
+SESSION_STOP_POLL_SEC = 0.05
+SESSION_FILE_STABILITY_TIMEOUT_SEC = 5.0
+SESSION_FILE_STABILITY_POLL_SEC = 0.05
+SESSION_FILE_STABILITY_CHECKS = 2
+
+
 @dataclass
 class StreamSession:
     pid: int
@@ -102,6 +112,78 @@ class StreamSession:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+
+@dataclass(frozen=True)
+class SessionReference:
+    """跨平台分析侧可消费的日志 session 引用。
+
+    iOS 的后台 session 使用 :class:`StreamSession`，Android 的 logger
+    使用单个 JSON 字典；分析命令只需要稳定的输出路径和设备标识，
+    因此在这里收敛成一个只读小模型，避免上层命令读取平台私有状态格式。
+    """
+
+    platform: str
+    output_path: str
+    device_name: str = ""
+    device_udid: str = ""
+
+
+def load_analysis_sessions(
+    log_output_dir: Path,
+    *,
+    platform: str = "ios",
+) -> Dict[str, SessionReference]:
+    """Load log sessions for analysis using the platform's state contract.
+
+    iOS keeps a multi-device ``.tracecite-sessions.json`` index, while Android
+    keeps one ``.tracecite-session.json`` state object.  This facade deliberately
+    returns only immutable references needed by ``filter --from-sessions``;
+    lifecycle/status operations remain owned by each platform implementation.
+    """
+
+    selected = str(platform or "ios").strip().lower() or "ios"
+    if selected == "android":
+        # Import lazily so the iOS/core path does not import Android tooling.
+        from ..platforms.android.logger import load_sessions
+
+        aggregate = load_sessions(log_output_dir)
+        if not isinstance(aggregate, dict):
+            return {}
+        references: Dict[str, SessionReference] = {}
+        for raw in aggregate.get("sessions") or []:
+            if not isinstance(raw, dict):
+                continue
+            output_path = str(raw.get("output_path") or "").strip()
+            if not output_path:
+                continue
+            device_udid = str(raw.get("serial") or "").strip()
+            device_name = str(
+                raw.get("device_name") or raw.get("model") or device_udid
+            ).strip()
+            key = device_udid or output_path
+            references[key] = SessionReference(
+                platform=selected,
+                output_path=output_path,
+                device_name=device_name,
+                device_udid=device_udid,
+            )
+        return references
+
+    if selected != "ios":
+        # Third-party platform session formats are plugin-owned; do not guess
+        # an iOS state file and silently analyze the wrong source.
+        return {}
+
+    return {
+        udid: SessionReference(
+            platform=selected,
+            output_path=session.output_path,
+            device_name=session.device_name,
+            device_udid=session.device_udid,
+        )
+        for udid, session in load_all_sessions(log_output_dir).items()
+    }
 
 
 def sessions_state_path(log_output_dir: Path) -> Path:
@@ -203,6 +285,75 @@ def _session_process_alive(session: StreamSession) -> bool:
     return _pid_alive(session.pid) and process_command_contains(
         session.pid, "tracecite_mobile"
     )
+
+
+def _wait_for_session_process_exit(
+    session: StreamSession,
+    *,
+    timeout_sec: float = SESSION_STOP_TIMEOUT_SEC,
+    poll_sec: float = SESSION_STOP_POLL_SEC,
+) -> bool:
+    """Confirm this session's collector has exited without ``waitpid``.
+
+    A PID that is still alive but no longer matches the collector command is
+    treated as uncertain (it may have been reused), rather than silently
+    considered stopped.  This is deliberately fail-closed so a subsequent
+    manifest cannot claim stable artifacts for an unknown writer.
+    """
+
+    deadline = time.monotonic() + max(0.0, float(timeout_sec))
+    while True:
+        if not _pid_alive(session.pid):
+            return True
+        if not _session_process_alive(session):
+            return False
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(max(0.0, float(poll_sec)))
+
+
+def _file_signature(path: Path) -> tuple[int, int]:
+    """Return size/mtime without reading potentially sensitive log content."""
+
+    stat = path.stat()
+    if not path.is_file():
+        raise OSError(f"session 产物不是普通文件: {path}")
+    return int(stat.st_size), int(stat.st_mtime_ns)
+
+
+def _wait_for_file_stable(
+    path: Path,
+    *,
+    timeout_sec: float = SESSION_FILE_STABILITY_TIMEOUT_SEC,
+    poll_sec: float = SESSION_FILE_STABILITY_POLL_SEC,
+    stable_checks: int = SESSION_FILE_STABILITY_CHECKS,
+) -> bool:
+    """Confirm a stopped-session artifact has a stable size and mtime.
+
+    The bounded two-observation check catches a delayed flush without opening
+    or copying the log.  A missing/unreadable path returns ``False`` so the
+    caller can fail closed before registering a hash in a passed manifest.
+    """
+
+    required = max(2, int(stable_checks))
+    deadline = time.monotonic() + max(0.0, float(timeout_sec))
+    previous: Optional[tuple[int, int]] = None
+    stable = 0
+    while True:
+        try:
+            current = _file_signature(path)
+        except OSError:
+            return False
+        if current == previous:
+            stable += 1
+        else:
+            previous = current
+            stable = 1
+        if stable >= required:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(max(0.0, float(poll_sec)))
 
 
 def _parse_started_at(started_at: str) -> Optional[datetime]:
@@ -440,19 +591,33 @@ def _stop_one_unlocked(
     sessions: Dict[str, StreamSession],
     session: StreamSession,
 ) -> StreamSession:
-    if _pid_alive(session.pid) and not _session_process_alive(session):
+    pid_alive = _pid_alive(session.pid)
+    process_alive = _session_process_alive(session) if pid_alive else False
+    if pid_alive and not process_alive:
         raise SessionError(
             f"状态中的 PID {session.pid} 已被其他进程复用，已拒绝发送停止信号。"
         )
-    if _session_process_alive(session):
+    if process_alive:
         try:
             os.killpg(session.pid, signal.SIGINT)
         except ProcessLookupError:
             pass
-        try:
-            os.waitpid(session.pid, 0)
-        except (ChildProcessError, ProcessLookupError):
-            pass
+        if not _wait_for_session_process_exit(session):
+            raise SessionError(
+                f"无法在限定时间内确认日志 collector 已退出（PID {session.pid}）；"
+                "未登记可变日志产物。"
+            )
+
+    # The collector normally closes both files as it exits, but a final flush
+    # can race the stop signal.  Do not let CommandRun hash a moving file.
+    for role, raw_path in (
+        ("device_log", session.output_path),
+        ("collector_log", session.stream_log_path),
+    ):
+        if not _wait_for_file_stable(Path(raw_path)):
+            raise SessionError(
+                f"无法确认 {role} 已稳定（{raw_path}）；未登记可变日志产物。"
+            )
     _cleanup_session_leftovers(session)
     sessions.pop(session.device_udid, None)
     return session

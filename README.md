@@ -69,6 +69,9 @@ tracecite-mobile capture stop    # → auto trace file + hang summary
 tracecite-mobile filter app.log --preset system-lifecycle --json
 tracecite-mobile filter app.log --preset network-http --json
 tracecite-mobile filter app.log --preset memory-leak --json
+
+# Add incident-specific terms without discarding the reusable preset (OR semantics)
+tracecite-mobile filter app.log --preset network-http --grep 'checkout|payment' --json
 ```
 
 ## vs. Dumping Raw Logs to AI
@@ -106,7 +109,14 @@ before dispatching a command.
 
 <img src="architecture.svg" alt="Mobile architecture: Device, Analysis, Knowledge, Plugin layers on Core" width="100%"/>
 
-`--platform ios|android` switches backends. All commands work across platforms.
+`--platform ios|android` switches backends through the same capability contract.
+Use `performance profiles` to discover supported profiles; optional operations
+fail explicitly when a backend does not declare them.
+
+```bash
+tracecite-mobile --platform ios performance profiles --json
+tracecite-mobile --platform android performance start --profile frame --json
+```
 
 ## Customization
 
@@ -114,6 +124,7 @@ before dispatching a command.
 
 ```bash
 tracecite-mobile filter app.log --preset system-lifecycle --json
+tracecite-mobile filter app.log --preset network-http --grep 'checkout|payment' --json
 tracecite-mobile grow propose term my-preset "payment failed" "network timeout" \
   --created-by agent-a --case-id run-001 --evidence evidence://run/001#manifest
 ```

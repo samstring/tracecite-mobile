@@ -110,6 +110,24 @@ class CliFilterScenarioTest(unittest.TestCase):
             self.assertIn("filtered_log", {row["role"] for row in manifest["artifacts"]})
             self.assertFalse((log_path.parent / ".filtered").exists())
 
+    def test_preset_and_grep_are_combined_with_or(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            log_path = self._project(root)
+            add_filter_terms("user-behavior", ["示例导航"], start_dir=root)
+
+            code, out, err = self._run(
+                root,
+                _args(log_path, preset="user-behavior", grep="unrelated"),
+            )
+
+            self.assertEqual(code, 0, err)
+            payload = json.loads(out)
+            self.assertEqual(payload["match_records"], 2)
+            self.assertEqual(payload["pattern_source"], "preset:user-behavior+grep")
+            self.assertIn("示例导航", payload["pattern"])
+            self.assertIn("unrelated", payload["pattern"])
+
     def test_unknown_scenario_reports_error_without_traceback(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

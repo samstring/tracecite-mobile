@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 from tracecite_mobile.cli import build_parser, main
+from tracecite_mobile.commands import analysis as analysis_commands
 
 
 def test_parser_registers_all_command_domains() -> None:
@@ -18,6 +19,46 @@ def test_parser_registers_all_command_domains() -> None:
     }
     for expected, argv in cases.items():
         assert parser.parse_args(argv).command == expected
+
+
+def test_filter_parser_accepts_preset_and_grep_together() -> None:
+    args = build_parser().parse_args(
+        [
+            "filter",
+            "app.log",
+            "--preset",
+            "system-fault",
+            "--grep",
+            "checkout|payment",
+        ]
+    )
+
+    assert args.preset == "system-fault"
+    assert args.grep == "checkout|payment"
+
+
+def test_scenario_commands_accept_and_forward_base_dir(monkeypatch) -> None:
+    for command in ("run", "validate", "explain"):
+        args = build_parser().parse_args(
+            [
+                "scenario",
+                command,
+                "scenario.json",
+                "--base-dir",
+                "/tmp/project",
+            ]
+        )
+        assert args.base_dir == "/tmp/project"
+
+        captured = {}
+
+        def fake_cmd_scenario(parsed):
+            captured["args"] = parsed
+            return 37
+
+        monkeypatch.setattr(analysis_commands, "cmd_scenario", fake_cmd_scenario)
+        assert analysis_commands.dispatch_analysis_command(args) == 37
+        assert captured["args"].base_dir == "/tmp/project"
 
 
 def test_android_profile_show_uses_common_maintenance_handler(
@@ -36,7 +77,7 @@ def test_plugin_list_and_doctor_are_machine_readable(capsys) -> None:
     assert main(["plugin", "list", "--json"]) == 0
     listed = json.loads(capsys.readouterr().out)
     assert listed["healthy"] is True
-    assert listed["api_versions"] == {"tracecite_core": "2", "tracecite_mobile": "2"}
+    assert listed["api_versions"] == {"tracecite_core": "2", "tracecite_mobile": "3"}
     assert "source_providers" in listed["extensions"]
     assert "event_transformers" in listed["extensions"]
     assert "behavior_parsers" in listed["extensions"]
