@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>The official Mobile domain extension for TraceCite.</strong>
+  <strong>The official Mobile domain adapter for the TraceCite agent context gateway.</strong>
 </p>
 
 <p align="center">

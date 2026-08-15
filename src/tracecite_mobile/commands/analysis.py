@@ -28,6 +28,7 @@ from ..analysis.scenario import cmd_scenario
 from ..device.session import SessionError, load_analysis_sessions
 from ..shared.config import ProfileError, load_project_profile
 from ..shared.command_run import CommandRun
+from tracecite.integrations.agent_projection import compact_filter_payload, encoded_json
 
 
 def register_analysis_commands(sub: argparse._SubParsersAction) -> None:
@@ -102,6 +103,23 @@ def register_analysis_commands(sub: argparse._SubParsersAction) -> None:
     )
     filter_parser.add_argument("--json", action="store_true", help="以 JSON 输出结果")
     filter_parser.add_argument(
+        "--agent-view",
+        action="store_true",
+        help="JSON 输出时附带 agent_view（默认与 --json 同时启用）",
+    )
+    filter_parser.add_argument(
+        "--no-agent-view",
+        action="store_true",
+        help="JSON 输出时不附带 agent_view",
+    )
+    filter_parser.add_argument(
+        "--max-line-chars",
+        type=int,
+        default=1024,
+        metavar="N",
+        help="过滤正文单行最大字符数，完整行保留在 records_path（默认 1024）",
+    )
+    filter_parser.add_argument(
         "--fold",
         action="store_true",
         help="生成模板折叠视图（.templates.jsonl）",
@@ -161,8 +179,24 @@ def register_analysis_commands(sub: argparse._SubParsersAction) -> None:
     scenario_verify.add_argument("--json", action="store_true", help="以 JSON 输出结果")
 
 
+def _attach_agent_view(payload: Dict[str, Any], *, enabled: bool) -> Dict[str, Any]:
+    if not enabled:
+        return payload
+    payload = dict(payload)
+    payload["agent_view"] = compact_filter_payload(payload)
+    return payload
+
+
+def _resolve_agent_view(args: argparse.Namespace) -> bool:
+    if getattr(args, "no_agent_view", False):
+        return False
+    if getattr(args, "agent_view", False) or getattr(args, "json", False):
+        return True
+    return False
+
+
 def _print_json(payload: Any) -> None:
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    print(encoded_json(payload))
 
 
 def _scenario_output_subdir(scenario: str) -> Optional[Path]:
@@ -450,6 +484,7 @@ def cmd_filter(args: argparse.Namespace) -> int:
             last=args.last,
             since=args.since,
             until=args.until,
+            max_line_chars=getattr(args, "max_line_chars", 1024),
             template_threshold=(
                 DEFAULT_TEMPLATE_THRESHOLD
                 if args.fold
@@ -488,8 +523,9 @@ def cmd_filter(args: argparse.Namespace) -> int:
             payload["input_lineage"] = [
                 {"original": str(unique_paths[0].resolve()), "snapshot": str(frozen_paths[0])}
             ]
+            agent_view = _resolve_agent_view(args)
             if args.json:
-                _print_json(payload)
+                _print_json(_attach_agent_view(payload, enabled=agent_view))
             else:
                 print(f"过滤完成: {result.match_records} 条 → {result.output_path}")
                 if result.match_records == 0:
@@ -519,8 +555,9 @@ def cmd_filter(args: argparse.Namespace) -> int:
             {"original": str(original.resolve()), "snapshot": str(frozen)}
             for original, frozen in zip(unique_paths, frozen_paths)
         ]
+        agent_view = _resolve_agent_view(args)
         if args.json:
-            _print_json(payload)
+            _print_json(_attach_agent_view(payload, enabled=agent_view))
         else:
             print(f"多文件过滤完成: {multi.match_records} 条")
             if multi.merged_timeline_path:
