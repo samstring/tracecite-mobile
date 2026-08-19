@@ -171,7 +171,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--instrument-dir",
-        default="~/Desktop/TraceCite/Instrument",
+        default="~/Documents/TraceCite/mobile/iOS/instrument",
         help="Directory used to auto-include the latest .trace when --trace is omitted",
     )
     parser.add_argument(
@@ -182,7 +182,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--output-dir",
-        default="~/Desktop/TraceCite/analysis",
+        default="~/Documents/TraceCite/mobile/iOS/exports",
         help="Destination directory for package folders and zip files",
     )
     parser.add_argument("--json", action="store_true", help="Print JSON result")

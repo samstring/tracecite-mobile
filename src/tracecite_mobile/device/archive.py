@@ -19,14 +19,29 @@ from ..shared.constants import (
     DEFAULT_ARCHIVE_INTERVAL_SEC,
     DEFAULT_HOT_WINDOW_SEC,
     LEGACY_ARCHIVE_DIRNAME,
+    SEAL_DONE_SUFFIX,
+    SEAL_REQUEST_SUFFIX,
 )
+from tracecite_core.live_cut import (
+    cooperative_live_cut,
+    cut_done_path as core_cut_done_path,
+    cut_request_path as core_cut_request_path,
+    rename_live_segment,
+)
+from tracecite_core.segment_store import (
+    StoredSegment,
+    append_segment,
+    load_segments,
+    save_segments,
+    unique_segment_path,
+)
+from tracecite_core.state_file import atomic_write_json, read_json, state_lock
 from tracecite_core.text_filter import (
     FilterError,
     parse_time_arg,
     record_timestamp,
     reference_datetime,
 )
-from tracecite_core.state_file import atomic_write_json, read_json
 from ..plugins.segmenters import DeviceLogSegmenter
 
 
@@ -73,31 +88,10 @@ def _safe_name(text: str) -> str:
 
 
 @dataclass
-class ArchiveSegment:
-    start: str
-    end: str
-    path: str
-    bytes: int
-    lines: int
+class ArchiveSegment(StoredSegment):
+    """Mobile archive 段；字段与 Core StoredSegment 一致。"""
 
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "start": self.start,
-            "end": self.end,
-            "path": self.path,
-            "bytes": self.bytes,
-            "lines": self.lines,
-        }
-
-    @classmethod
-    def from_dict(cls, data: Dict[str, Any]) -> "ArchiveSegment":
-        return cls(
-            start=str(data["start"]),
-            end=str(data["end"]),
-            path=str(data["path"]),
-            bytes=int(data.get("bytes", 0)),
-            lines=int(data.get("lines", 0)),
-        )
+    pass
 
 
 @dataclass
@@ -199,27 +193,15 @@ def manifest_path(device_archive_dir: Path) -> Path:
 
 
 def load_manifest(device_archive_dir: Path) -> List[ArchiveSegment]:
-    path = manifest_path(device_archive_dir)
-    if not path.is_file():
-        return []
-    try:
-        data = read_json(path)
-    except ValueError as exc:
-        raise ArchiveError(str(exc)) from exc
-    segments = data.get("segments") or []
-    if not isinstance(segments, list):
-        raise ArchiveError(f"manifest segments 必须是数组: {path}")
-    return [ArchiveSegment.from_dict(item) for item in segments]
+    rows = load_segments(device_archive_dir, filename=ARCHIVE_MANIFEST_FILENAME)
+    return [ArchiveSegment(**row.__dict__) for row in rows]
 
 
 def save_manifest(device_archive_dir: Path, segments: List[ArchiveSegment]) -> None:
-    device_archive_dir.mkdir(parents=True, exist_ok=True)
-    atomic_write_json(
-        manifest_path(device_archive_dir),
-        {
-            "updated_at": datetime.now().isoformat(timespec="seconds"),
-            "segments": [s.to_dict() for s in segments],
-        },
+    save_segments(
+        device_archive_dir,
+        [StoredSegment(**segment.__dict__) for segment in segments],
+        filename=ARCHIVE_MANIFEST_FILENAME,
     )
 
 
@@ -289,130 +271,118 @@ def rotate_hot_log(
     若传入 open_fp（stream 正在写），原地 truncate 重写后保持句柄可用。
     """
     path = hot_path.expanduser().resolve()
-    if open_fp is not None:
-        open_fp.flush()
-    # 先清理上次异常退出可能残留的同名 rotate tmp，避免中间文件堆积
-    cleanup_rotate_tmp(path)
-    # 文件可能以 "w"/"a" 打开不可读：统一从磁盘读当前内容
-    if not path.is_file():
-        raise ArchiveError(f"hot 日志不存在: {path}")
-    text = path.read_text(encoding="utf-8", errors="replace")
+    with state_lock(path):
+        if open_fp is not None:
+            open_fp.flush()
+        cleanup_rotate_tmp(path)
+        if not path.is_file():
+            raise ArchiveError(f"hot 日志不存在: {path}")
+        text = path.read_text(encoding="utf-8", errors="replace")
 
-    if not text.strip():
-        return RotateResult(
-            rotated=False,
-            cutoff=None,
-            last_ts=None,
-            archived=[],
-            hot_path=str(path),
-            hot_lines=0,
-            hot_bytes=0,
-        )
+        if not text.strip():
+            return RotateResult(
+                rotated=False,
+                cutoff=None,
+                last_ts=None,
+                archived=[],
+                hot_path=str(path),
+                hot_lines=0,
+                hot_bytes=0,
+            )
 
-    # 写临时文件供 record 迭代（与 filter 同一合并逻辑）
-    tmp = path.with_name(f".{path.name}.rotate.tmp")
-    try:
-        tmp.write_text(text, encoding="utf-8")
-        ref = reference_datetime(tmp, segmenter=_DEVICE_SEGMENTER)
-        records = list(_DEVICE_SEGMENTER.segment_file(tmp))
-        last_ts: Optional[datetime] = None
-        stamped: List[Tuple[Optional[datetime], str]] = []
-        for record in records:
-            ts = record_timestamp(record, ref=ref, segmenter=_DEVICE_SEGMENTER)
-            if ts is not None:
-                last_ts = ts
-            stamped.append((ts, record.text if record.text.endswith("\n") else record.text + "\n"))
-    finally:
-        tmp.unlink(missing_ok=True)
+        tmp = path.with_name(f".{path.name}.rotate.tmp")
+        try:
+            tmp.write_text(text, encoding="utf-8")
+            ref = reference_datetime(tmp, segmenter=_DEVICE_SEGMENTER)
+            records = list(_DEVICE_SEGMENTER.segment_file(tmp))
+            last_ts: Optional[datetime] = None
+            stamped: List[Tuple[Optional[datetime], str]] = []
+            for record in records:
+                ts = record_timestamp(record, ref=ref, segmenter=_DEVICE_SEGMENTER)
+                if ts is not None:
+                    last_ts = ts
+                stamped.append((ts, record.text if record.text.endswith("\n") else record.text + "\n"))
+        finally:
+            tmp.unlink(missing_ok=True)
 
-    if last_ts is None:
-        hot_lines = text.count("\n")
-        return RotateResult(
-            rotated=False,
-            cutoff=None,
-            last_ts=None,
-            archived=[],
-            hot_path=str(path),
-            hot_lines=hot_lines,
-            hot_bytes=len(text.encode("utf-8")),
-        )
+        if last_ts is None:
+            hot_lines = text.count("\n")
+            return RotateResult(
+                rotated=False,
+                cutoff=None,
+                last_ts=None,
+                archived=[],
+                hot_path=str(path),
+                hot_lines=hot_lines,
+                hot_bytes=len(text.encode("utf-8")),
+            )
 
-    cutoff = last_ts - timedelta(seconds=max(1, int(hot_window_sec)))
-    archive_parts: List[str] = []
-    hot_parts: List[str] = []
-    archive_start: Optional[datetime] = None
-    archive_end: Optional[datetime] = None
+        cutoff = last_ts - timedelta(seconds=max(1, int(hot_window_sec)))
+        archive_parts: List[str] = []
+        hot_parts: List[str] = []
+        archive_start: Optional[datetime] = None
+        archive_end: Optional[datetime] = None
 
-    for ts, chunk in stamped:
-        # 无时间戳：跟当前桶（还在 archive 阶段则进 archive，否则进 hot）
-        if ts is None:
-            if archive_parts and not hot_parts:
+        for ts, chunk in stamped:
+            if ts is None:
+                if archive_parts and not hot_parts:
+                    archive_parts.append(chunk)
+                else:
+                    hot_parts.append(chunk)
+                continue
+            if ts < cutoff:
                 archive_parts.append(chunk)
+                archive_start = ts if archive_start is None else min(archive_start, ts)
+                archive_end = ts if archive_end is None else max(archive_end, ts)
             else:
                 hot_parts.append(chunk)
-            continue
-        if ts < cutoff:
-            archive_parts.append(chunk)
-            archive_start = ts if archive_start is None else min(archive_start, ts)
-            archive_end = ts if archive_end is None else max(archive_end, ts)
-        else:
-            hot_parts.append(chunk)
 
-    if not archive_parts:
-        hot_text = "".join(hot_parts) if hot_parts else text
+        if not archive_parts:
+            hot_text = "".join(hot_parts) if hot_parts else text
+            _rewrite_hot(path, hot_text, open_fp=open_fp)
+            return RotateResult(
+                rotated=False,
+                cutoff=_iso(cutoff),
+                last_ts=_iso(last_ts),
+                archived=[],
+                hot_path=str(path),
+                hot_lines=hot_text.count("\n"),
+                hot_bytes=len(hot_text.encode("utf-8")),
+            )
+
+        assert archive_start is not None and archive_end is not None
+        device_dir = archive_device_dir(path.parent, device_name)
+        device_dir.mkdir(parents=True, exist_ok=True)
+        seg_path = unique_segment_path(device_dir, archive_start, archive_end, prefix="")
+        if seg_path.name.startswith("_"):
+            seg_path = device_dir / f"{_stamp(archive_start)}-{_stamp(archive_end)}.log"
+
+        archive_text = "".join(archive_parts)
+        seg_path.write_text(archive_text, encoding="utf-8")
+        segment = ArchiveSegment(
+            start=_iso(archive_start),
+            end=_iso(archive_end),
+            path=str(seg_path),
+            bytes=len(archive_text.encode("utf-8")),
+            lines=archive_text.count("\n"),
+        )
+        segments = load_manifest(device_dir)
+        segments.append(segment)
+        segments.sort(key=lambda s: s.start)
+        save_manifest(device_dir, segments)
+
+        hot_text = "".join(hot_parts)
         _rewrite_hot(path, hot_text, open_fp=open_fp)
+
         return RotateResult(
-            rotated=False,
+            rotated=True,
             cutoff=_iso(cutoff),
             last_ts=_iso(last_ts),
-            archived=[],
+            archived=[segment],
             hot_path=str(path),
             hot_lines=hot_text.count("\n"),
             hot_bytes=len(hot_text.encode("utf-8")),
         )
-
-    # archive 段右端用 cutoff（半开语义说明写在 manifest end=最后归档记录时间）
-    assert archive_start is not None and archive_end is not None
-    device_dir = archive_device_dir(path.parent, device_name)
-    device_dir.mkdir(parents=True, exist_ok=True)
-    seg_name = f"{_stamp(archive_start)}-{_stamp(archive_end)}.log"
-    seg_path = device_dir / seg_name
-    # 撞名则追加序号
-    if seg_path.exists():
-        n = 1
-        while True:
-            candidate = device_dir / f"{_stamp(archive_start)}-{_stamp(archive_end)}_{n}.log"
-            if not candidate.exists():
-                seg_path = candidate
-                break
-            n += 1
-
-    archive_text = "".join(archive_parts)
-    seg_path.write_text(archive_text, encoding="utf-8")
-    segment = ArchiveSegment(
-        start=_iso(archive_start),
-        end=_iso(archive_end),
-        path=str(seg_path),
-        bytes=len(archive_text.encode("utf-8")),
-        lines=archive_text.count("\n"),
-    )
-    segments = load_manifest(device_dir)
-    segments.append(segment)
-    segments.sort(key=lambda s: s.start)
-    save_manifest(device_dir, segments)
-
-    hot_text = "".join(hot_parts)
-    _rewrite_hot(path, hot_text, open_fp=open_fp)
-
-    return RotateResult(
-        rotated=True,
-        cutoff=_iso(cutoff),
-        last_ts=_iso(last_ts),
-        archived=[segment],
-        hot_path=str(path),
-        hot_lines=hot_text.count("\n"),
-        hot_bytes=len(hot_text.encode("utf-8")),
-    )
 
 
 def _rewrite_hot(path: Path, hot_text: str, *, open_fp: Optional[TextIO]) -> None:
@@ -432,6 +402,149 @@ def _rewrite_hot(path: Path, hot_text: str, *, open_fp: Optional[TextIO]) -> Non
         tmp_path.replace(path)
     finally:
         tmp_path.unlink(missing_ok=True)
+
+
+@dataclass
+class SealResult:
+    sealed_path: str
+    hot_path: str
+    start: Optional[str]
+    end: Optional[str]
+    bytes: int
+    lines: int
+    segment: ArchiveSegment
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "sealed_path": self.sealed_path,
+            "hot_path": self.hot_path,
+            "start": self.start,
+            "end": self.end,
+            "bytes": self.bytes,
+            "lines": self.lines,
+            "segment": self.segment.to_dict(),
+        }
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> "SealResult":
+        segment_raw = data.get("segment") or {}
+        return cls(
+            sealed_path=str(data["sealed_path"]),
+            hot_path=str(data["hot_path"]),
+            start=data.get("start"),
+            end=data.get("end"),
+            bytes=int(data.get("bytes", 0)),
+            lines=int(data.get("lines", 0)),
+            segment=ArchiveSegment.from_dict(segment_raw),
+        )
+
+
+def seal_request_path(hot_path: Path) -> Path:
+    return core_cut_request_path(hot_path, request_suffix=SEAL_REQUEST_SUFFIX)
+
+
+def seal_done_path(hot_path: Path) -> Path:
+    return core_cut_done_path(hot_path, done_suffix=SEAL_DONE_SUFFIX)
+
+
+def _segment_bounds_for_file(path: Path) -> Tuple[Optional[datetime], Optional[datetime], int, int]:
+    text = path.read_text(encoding="utf-8", errors="replace")
+    if not text.strip():
+        return None, None, 0, 0
+    tmp = path.with_name(f".{path.name}.rotate.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        ref = reference_datetime(tmp, segmenter=_DEVICE_SEGMENTER)
+        start_ts: Optional[datetime] = None
+        end_ts: Optional[datetime] = None
+        for record in _DEVICE_SEGMENTER.segment_file(tmp):
+            ts = record_timestamp(record, ref=ref, segmenter=_DEVICE_SEGMENTER)
+            if ts is None:
+                continue
+            start_ts = ts if start_ts is None else min(start_ts, ts)
+            end_ts = ts if end_ts is None else max(end_ts, ts)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return start_ts, end_ts, text.count("\n"), len(text.encode("utf-8"))
+
+
+def seal_hot_log(
+    hot_path: Path,
+    *,
+    device_name: str,
+    open_fp: Optional[TextIO] = None,
+) -> Tuple[SealResult, Optional[TextIO]]:
+    """Rename 当前 hot 为 archive 段并创建空 hot；采集进程可传入 open_fp 并重绑。"""
+    path = hot_path.expanduser().resolve()
+    if not path.is_file():
+        raise ArchiveError(f"hot 日志不存在: {path}")
+    device_dir = archive_device_dir(path.parent, device_name)
+    device_dir.mkdir(parents=True, exist_ok=True)
+
+    with state_lock(path):
+        start_ts, end_ts, line_count, byte_count = _segment_bounds_for_file(path)
+        if byte_count <= 0:
+            raise ArchiveError(f"hot 日志为空，无法 seal: {path}")
+        now = datetime.now()
+        archive_start = start_ts or now
+        archive_end = end_ts or now
+        seg_path = unique_segment_path(device_dir, archive_start, archive_end, prefix="sealed")
+        try:
+            new_fp = rename_live_segment(path, seg_path, open_fp=open_fp, acquire_lock=False)
+        except Exception as exc:
+            raise ArchiveError(str(exc)) from exc
+
+    segment = ArchiveSegment(
+        start=_iso(archive_start),
+        end=_iso(archive_end),
+        path=str(seg_path),
+        bytes=byte_count,
+        lines=line_count,
+    )
+    append_segment(device_dir, StoredSegment(**segment.__dict__), filename=ARCHIVE_MANIFEST_FILENAME)
+
+    result = SealResult(
+        sealed_path=str(seg_path),
+        hot_path=str(path),
+        start=segment.start,
+        end=segment.end,
+        bytes=byte_count,
+        lines=line_count,
+        segment=segment,
+    )
+    return result, new_fp
+
+
+def request_seal_hot(
+    hot_path: Path,
+    *,
+    device_name: str,
+    timeout_sec: float = 30.0,
+    poll_sec: float = 0.05,
+) -> SealResult:
+    """请求采集进程 seal；若无响应则在无写入锁下直接 seal。"""
+    path = hot_path.expanduser().resolve()
+
+    def _direct() -> SealResult:
+        result, _ = seal_hot_log(path, device_name=device_name, open_fp=None)
+        return result
+
+    try:
+        return cooperative_live_cut(
+            path,
+            request_suffix=SEAL_REQUEST_SUFFIX,
+            done_suffix=SEAL_DONE_SUFFIX,
+            request_payload={
+                "device_name": device_name,
+                "requested_at": datetime.now().isoformat(timespec="seconds"),
+            },
+            deserialize=SealResult.from_dict,
+            direct_cut=_direct,
+            timeout_sec=timeout_sec,
+            poll_sec=poll_sec,
+        )
+    except Exception as exc:
+        raise ArchiveError(str(exc)) from exc
 
 
 def pull_archive_window(
@@ -603,6 +716,7 @@ class HotRotatingWriter:
         with self._lock:
             if self._closed:
                 raise ValueError("I/O operation on closed HotRotatingWriter")
+            self._maybe_handle_seal_request_locked()
             self._file.write(data)
             self._file.flush()
             if self._mirror and self._mirror_stream is not None:
@@ -610,6 +724,26 @@ class HotRotatingWriter:
                 self._mirror_stream.flush()
             if data:
                 self._check_due_locked()
+
+    def _maybe_handle_seal_request_locked(self) -> None:
+        req_path = seal_request_path(self._hot_path)
+        if not req_path.is_file():
+            return
+        try:
+            payload = read_json(req_path)
+            device_name = str(payload.get("device_name") or self._device_name)
+            result, new_fp = seal_hot_log(
+                self._hot_path,
+                device_name=device_name,
+                open_fp=self._file,
+            )
+            if new_fp is not None:
+                self._file = new_fp
+            atomic_write_json(seal_done_path(self._hot_path), result.to_dict())
+        except Exception as exc:  # noqa: BLE001 - seal 失败不能打断采集
+            _log_rotate_failure(self._hot_path, exc)
+        finally:
+            req_path.unlink(missing_ok=True)
 
     def _check_due_locked(self, *, force: bool = False) -> bool:
         now = self._clock()
@@ -639,6 +773,10 @@ class HotRotatingWriter:
 
     def _scheduler_loop(self) -> None:
         while not self._scheduler_wait(self._archive_interval_sec):
+            with self._lock:
+                if self._closed:
+                    return
+                self._maybe_handle_seal_request_locked()
             self.check_due()
 
     def start_scheduler(self) -> None:

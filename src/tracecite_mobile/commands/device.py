@@ -22,6 +22,7 @@ from ..shared.constants import (
 
 from ..shared.config import load_project_profile
 from ..shared.command_run import CommandRun
+from ..shared.log_paths import resolve_runs_dir
 from ..platforms.base import BackendError, UnsupportedCapabilityError
 from ..platforms.registry import get_backend
 from ..platforms.models import (
@@ -63,12 +64,15 @@ def _new_device_run(
     return command_run
 
 
-def _run_root_for_output(output_dir: Path) -> Path:
-    """Keep default device runs central; colocate explicitly redirected runs."""
+def _run_root_for_output(output_dir: Path, *, platform: str = "ios") -> Path:
+    """默认 layout runs；显式重定向输出目录时 colocate .runs。"""
     resolved = Path(output_dir).expanduser().resolve()
+    default_log = DEFAULT_LOG_OUTPUT_DIR.expanduser().resolve()
+    if resolved == default_log or default_log in resolved.parents:
+        return resolve_runs_dir(platform)
     default_root = DEFAULT_OUTPUT_ROOT_DIR.expanduser().resolve()
     if resolved == default_root or default_root in resolved.parents:
-        return DEFAULT_RUN_OUTPUT_DIR
+        return resolve_runs_dir(platform)
     return resolved / ".runs"
 
 
@@ -585,7 +589,7 @@ def _dispatch_backend(args: argparse.Namespace) -> int:
             command_run = _new_device_run(
                 "stream",
                 platform=platform,
-                run_root=_run_root_for_output(output_dir),
+                run_root=_run_root_for_output(output_dir, platform=platform),
                 parameters={
                     "device_udid": device.identifier,
                     "device_name": device.name,
@@ -685,7 +689,7 @@ def _dispatch_backend(args: argparse.Namespace) -> int:
             command_run = _new_device_run(
                 operation,
                 platform=platform,
-                run_root=_run_root_for_output(output_dir),
+                run_root=_run_root_for_output(output_dir, platform=platform),
                 parameters={
                     "output_dir": str(output_dir),
                     "device_udids": [d.identifier for d in selected_devices or []],
@@ -790,7 +794,7 @@ def _dispatch_backend(args: argparse.Namespace) -> int:
             command_run = _new_device_run(
                 f"{command}-{subcommand}",
                 platform=platform,
-                run_root=_run_root_for_output(output_dir),
+                run_root=_run_root_for_output(output_dir, platform=platform),
                 parameters={"output_dir": str(output_dir)},
             )
             if subcommand == "start":
@@ -964,7 +968,7 @@ def _dispatch_backend(args: argparse.Namespace) -> int:
                 command_run = _new_device_run(
                     "archive-pull",
                     platform=platform,
-                    run_root=_run_root_for_output(output_dir),
+                    run_root=_run_root_for_output(output_dir, platform=platform),
                     parameters={
                         "device": getattr(args, "device", None),
                         "since": args.since,
@@ -1003,7 +1007,7 @@ def _dispatch_backend(args: argparse.Namespace) -> int:
                 command_run = _new_device_run(
                     "archive-rotate",
                     platform=platform,
-                    run_root=_run_root_for_output(hot_path.parent),
+                    run_root=_run_root_for_output(hot_path.parent, platform=platform),
                     parameters={"hot_path": str(hot_path)},
                 )
                 result = rotate(

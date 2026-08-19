@@ -5,5 +5,5 @@
 - Keep device integrations and mobile adapters here. Generic runtime workflows live in `tracecite`.
 - Put all product names, internal URLs, company APM markers, and business scenarios
   in a private extension project.
-- Use `.tracecite/` for project-local state and `~/Desktop/TraceCite/` for defaults.
+- Use `.tracecite/` for project-local state and `~/Documents/TraceCite/` for defaults.
 - Tests, starter knowledge, docs, and examples must use synthetic data.

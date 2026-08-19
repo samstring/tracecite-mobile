@@ -59,7 +59,7 @@ def test_custom_platform_has_generic_profile(tmp_path, monkeypatch, capsys) -> N
     assert payload["platform"] == "profile-platform"
     assert payload["scenarios"] == {}
     assert payload["filter_presets"] == {}
-    assert payload["log_output_dir"].endswith("/profile-platform/Log")
+    assert payload["log_output_dir"].endswith("/profile-platform/log")
 
 
 def test_behavior_parser_provider_is_project_neutral(tmp_path) -> None:

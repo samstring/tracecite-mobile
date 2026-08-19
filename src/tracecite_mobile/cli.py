@@ -16,6 +16,7 @@ from .commands.maintenance import (
     dispatch_maintenance_command,
     register_maintenance_commands,
 )
+from .commands.seal import dispatch_seal_command, register_seal_commands
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -36,6 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
     register_device_commands(sub)
+    register_seal_commands(sub)
     register_analysis_commands(sub)
     register_knowledge_commands(sub)
     register_maintenance_commands(sub)
@@ -49,6 +51,7 @@ def _should_ensure_default_knowledge(args: argparse.Namespace) -> bool:
     return args.command in {
         "filter",
         "behavior",
+        "seal",
         "grow",
         "preset",
         "profile",
@@ -124,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     for dispatch in (
+        dispatch_seal_command,
         dispatch_device_command,
         dispatch_analysis_command,
         dispatch_knowledge_command,

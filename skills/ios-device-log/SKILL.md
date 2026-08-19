@@ -1,7 +1,7 @@
 ---
 name: ios-device-log
 description: >-
-  使用 tracecite-mobile 采集 iPhone 真机运行日志，并通过 snapshot、时间窗、preset
+  使用 tracecite-mobile 采集 iPhone 真机运行日志，并通过 seal、时间窗、preset
   和行为摘要生成可复核证据。用户要求抓取 iOS 日志、启动后台日志 session、过滤日志
   或还原操作链时使用。
 ---
@@ -55,7 +55,7 @@ tracecite-mobile session start --udid <UDID> --date --json
 tracecite-mobile session status --json
 ```
 
-session 默认持续采集。分析时冻结快照，不要因为一次分析自动停止 session。只有用户明确
+session 默认持续采集。分析前用 **seal** 切段冻结证据，不要因为一次分析自动停止 session。只有用户明确
 要求停止时才执行：
 
 ```bash
@@ -68,20 +68,27 @@ tracecite-mobile session stop --udid <UDID> --json
 tracecite-mobile stream --udid <UDID> --date
 ```
 
-默认日志目录是 `~/Desktop/TraceCite/Log/`，实际路径以命令 JSON 输出或 profile 为准。
+默认日志目录是 `~/Documents/TraceCite/mobile/iOS/log/`，实际路径以命令 JSON 输出或 profile 为准。
 
 ### 2. 冻结并过滤
 
-优先直接读取当前 session，避免手工猜日志路径：
+优先直接读取当前 session，避免手工猜日志路径。live hot 用 **seal**（O(1) rename），不要用 copy2 snapshot：
 
 ```bash
-tracecite-mobile filter --from-sessions --snapshot --last 5m --preset system-lifecycle --json
+tracecite-mobile seal --from-sessions --json
+tracecite-mobile filter --from-sessions --last 5m --preset system-lifecycle --json
 ```
 
-也可对明确的日志路径过滤：
+或一行：
 
 ```bash
-tracecite-mobile filter "$LOG" --snapshot --since "20:15:00" --until "20:16:00" --grep 'request|response|timeout' --json
+tracecite-mobile filter --from-sessions --seal-first --last 5m --preset system-lifecycle --json
+```
+
+对已归档 / sealed 段或外部静态日志，可直接 filter（无需 snapshot）：
+
+```bash
+tracecite-mobile filter "$LOG" --since "20:15:00" --until "20:16:00" --grep 'request|response|timeout' --json
 ```
 
 后续只使用 JSON 返回的 `output_path`。`match_records=0` 时依次放宽 pattern、扩大时间窗、
@@ -105,7 +112,7 @@ tracecite-mobile grow propose scenario task-flow --title "Task flow" --created-b
 # 用第二个独立案例 verify，再由不同人工审核人 promote；场景晋升后再提出 term/marker 候选。
 tracecite-mobile grow verify kc-DEMO --case-id run-2 --outcome support --verified-by agent-b --evidence evidence://run/2#manifest
 tracecite-mobile grow promote kc-DEMO --approved-by human-reviewer
-tracecite-mobile filter "$LOG" --snapshot --last 5m --preset user-behavior --scenario task-flow --json
+tracecite-mobile filter "$LOG" --seal-first --last 5m --preset user-behavior --scenario task-flow --json
 ```
 
 一次性请求 ID、用户文案和高频轮询词不要沉淀为全局 starter knowledge。
@@ -114,11 +121,10 @@ tracecite-mobile filter "$LOG" --snapshot --last 5m --preset user-behavior --sce
 
 1. 必须实际执行 `tracecite-mobile`，并以命令 JSON 输出为事实来源。
 2. 多台设备必须先让用户选择。
-3. 必经 `filter --snapshot --json`；分析正在写入的日志时不得直接整份读取。
+3. live hot 必经 `seal` 或 `filter --seal-first --json`；分析正在写入的日志时不得直接整份读取。
 4. 默认同时生成行为摘要；若行为信号不足，需要明确说明。
-5. 回复采用“结论 → 证据 → 详细输出”，详细输出只给 evidence/report 路径。
-6. 分析结束后，把结论追加到
-   `~/Desktop/TraceCite/analysis/conclusions/YYYY-MM-DD.md`。
+5. 回复采用“结论 → 证据 → 详细输出”，详细输出只给 manifest / runs 下的 evidence 路径。
+6. 分析 run 默认写入 `~/Documents/TraceCite/mobile/iOS/runs/`。
 
 ## 常见故障
 

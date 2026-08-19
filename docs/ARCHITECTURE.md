@@ -64,7 +64,8 @@ Background log sessions treat collector and device logs as mutable live outputs:
   write a passed manifest containing mutable log artifacts.
 
 Project metadata lives in `.tracecite/`; default run artifacts live under
-`~/Desktop/TraceCite/analysis/runs/`.
+`~/Documents/TraceCite/mobile/{iOS,Android}/runs/`. Override via
+`~/.tracecite/output.json`.
 
 ## Hot-log archive lifecycle
 

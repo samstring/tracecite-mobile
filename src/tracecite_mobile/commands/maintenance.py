@@ -14,6 +14,7 @@ from ..shared.constants import (
     DEFAULT_LOG_OUTPUT_DIR,
 )
 
+from ..shared.log_paths import resolve_runs_dir
 from ..device.cleanup import CleanupError, clean_analysis_artifacts
 from ..shared.config import ProfileError, load_project_profile, write_profile_template
 from ..shared.update_check import (
@@ -165,28 +166,20 @@ def cmd_clean(args: argparse.Namespace) -> int:
             if args.capture_dir
             else profile.capture_output_dir
         )
+        runs_dir = profile.analysis_output_dir or resolve_runs_dir(args.platform, profile)
         result = clean_analysis_artifacts(
             log_dir=log_dir,
             capture_dir=capture_dir,
             analysis_dir=(
                 Path(args.analysis_dir).expanduser()
                 if args.analysis_dir
-                else (profile.analysis_output_dir or DEFAULT_ANALYSIS_OUTPUT_DIR)
+                else runs_dir
             ),
             before=args.before,
             dry_run=args.dry_run,
             include_archive=bool(args.include_archive),
             confirm_archive=bool(args.yes),
-            extra_analysis_dirs=(
-                (Path.cwd() / ".tracecite" / "runs",)
-                if not args.analysis_dir
-                else ()
-            ),
-            extra_run_roots=(
-                (log_dir / ".runs", capture_dir / ".runs")
-                if not args.analysis_dir
-                else ()
-            ),
+            extra_run_roots=((runs_dir,) if not args.analysis_dir else ()),
         )
         if args.json:
             print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))

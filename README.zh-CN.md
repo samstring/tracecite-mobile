@@ -49,8 +49,9 @@ tracecite-mobile session start --date
 
 # ... 在设备上复现问题 ...
 
-# 2. 分析事发前后 2 分钟的日志
-tracecite-mobile filter --from-sessions --snapshot --last 2m --preset system-fault --json
+# 2. 分析事发前后 2 分钟的日志（先 seal 切段，再 filter）
+tracecite-mobile seal --from-sessions --json
+tracecite-mobile filter --from-sessions --last 2m --preset system-fault --json
 
 # 3. 把日志行提升为用户行为事件
 tracecite-mobile behavior summarize --from-sessions --json
@@ -62,9 +63,7 @@ tracecite-mobile behavior summarize --from-sessions --json
 
 维护清理是显式操作：`clean analysis --before today` 只清理过期日志、性能产物
 和未 pinned 的已完成分析运行；运行状态、锁、仍在采集/恢复中的产物以及损坏的
-manifest 会 fail-closed 保留。默认还会检查项目 `.tracecite/runs`，以及日志/性能
-输出目录下重定向产生的 `.runs` 容器，并逐个运行目录判断，不会整体删除容器。
-归档证据默认不碰；先用
+manifest 会 fail-closed 保留。分析 run 默认清理 `~/Documents/TraceCite/mobile/*/runs/`（及 profile 指定的 `analysis_output_dir`）；日志/性能目录下的 `.runs` 容器也会逐个 run 判断。归档证据默认不碰；先用
 `clean analysis --include-archive --dry-run` 预览，实际删除必须同时指定
 `--include-archive --yes`。
 

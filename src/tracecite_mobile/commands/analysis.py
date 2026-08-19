@@ -25,9 +25,12 @@ from tracecite_core.text_filter import (
 from ..analysis.behavior_summary import summarize_behavior_file
 from ..analysis.knowledge import KnowledgeError, resolve_scenario_pattern
 from ..analysis.scenario import cmd_scenario
+from ..device.archive import ArchiveError, request_seal_hot
 from ..device.session import SessionError, load_analysis_sessions
 from ..shared.config import ProfileError, load_project_profile
 from ..shared.command_run import CommandRun
+from ..shared.log_paths import resolve_runs_dir, infer_device_name_from_hot
+from ..shared.output_layout import is_immutable_log_source
 from tracecite.integrations.agent_projection import compact_filter_payload, encoded_json
 
 
@@ -74,7 +77,12 @@ def register_analysis_commands(sub: argparse._SubParsersAction) -> None:
     filter_parser.add_argument(
         "--snapshot",
         action="store_true",
-        help="先冻结快照再过滤；指定 --out 时快照也写入输出目录",
+        help="先冻结快照再过滤（live hot 推荐改用 --seal-first）；指定 --out 时快照也写入输出目录",
+    )
+    filter_parser.add_argument(
+        "--seal-first",
+        action="store_true",
+        help="过滤前先 seal 当前 hot（O(1) rename 切段），替代对 live 日志的 copy2 snapshot",
     )
     filter_parser.add_argument(
         "--segmenter",
@@ -293,24 +301,43 @@ def _register_filter_artifacts(command_run: CommandRun, payload: Dict[str, Any])
             command_run.add_artifact(row.get(key), role=role)
 
 
+def _seal_paths_before_filter(
+    paths: list[Path],
+    labels: list[str],
+) -> list[Path]:
+    sealed: list[Path] = []
+    for index, path in enumerate(paths):
+        if is_immutable_log_source(path):
+            sealed.append(path)
+            continue
+        label = labels[index] if index < len(labels) else ""
+        result = request_seal_hot(
+            path,
+            device_name=infer_device_name_from_hot(path, label),
+        )
+        sealed.append(Path(result.sealed_path))
+    return sealed
+
+
 def cmd_behavior(args: argparse.Namespace) -> int:
     path = Path(args.log_path).expanduser()
     platform = getattr(args, "platform", "ios")
+    profile = load_project_profile(Path.cwd(), platform=platform)
     command_run = CommandRun(
         name="behavior-summarize",
         kind="behavior",
         platform=platform,
-        run_root=Path.cwd() / ".tracecite" / "runs",
+        run_root=resolve_runs_dir(platform, profile),
         parameters={
             "dedupe": not args.no_dedupe,
             "scenario": getattr(args, "scenario", None),
         },
     )
     try:
-        frozen = command_run.freeze_input(path)
+        prepared = command_run.prepare_input(path)
         command_run.freeze_project_context(Path.cwd(), platform=platform)
         summary = summarize_behavior_file(
-            frozen,
+            prepared,
             dedupe=not args.no_dedupe,
             start_dir=Path.cwd(),
             scenario=getattr(args, "scenario", None),
@@ -336,7 +363,10 @@ def cmd_behavior(args: argparse.Namespace) -> int:
         )
         payload.update(run_fields)
         payload["report_path"] = str(report_path)
-        payload["input_lineage"] = {"original": str(path.resolve()), "snapshot": str(frozen)}
+        payload["input_lineage"] = {
+            "original": str(path.resolve()),
+            "work_input": str(prepared),
+        }
     except (KnowledgeError, OSError, RunIntegrityError) as exc:
         failed = command_run.fail(exc)
         print(f"错误: {exc}", file=sys.stderr)
@@ -431,6 +461,13 @@ def cmd_filter(args: argparse.Namespace) -> int:
                 "--out 只适用于单文件；多文件请分别执行或使用 scenario output.run_dir"
             )
 
+        if getattr(args, "seal_first", False):
+            unique_paths = _seal_paths_before_filter(unique_paths, unique_labels)
+
+        use_snapshot = bool(args.snapshot) and not getattr(args, "seal_first", False)
+        if use_snapshot and all(is_immutable_log_source(path) for path in unique_paths):
+            use_snapshot = False
+
         format_spec = _parse_format_arg(args.format)
         if len(unique_paths) > 1 and args.segmenter == "auto" and format_spec is None:
             segmenter = [
@@ -448,7 +485,7 @@ def cmd_filter(args: argparse.Namespace) -> int:
             name="filter",
             kind="filter",
             platform=platform,
-            run_root=Path.cwd() / ".tracecite" / "runs",
+            run_root=resolve_runs_dir(platform, profile),
             parameters={
                 "pattern": pattern,
                 "pattern_source": pattern_source,
@@ -457,7 +494,8 @@ def cmd_filter(args: argparse.Namespace) -> int:
                 "segmenters": [
                     item.name for item in segmenter
                 ] if isinstance(segmenter, list) else [segmenter.name],
-                "snapshot": bool(args.snapshot),
+                "snapshot": use_snapshot,
+                "seal_first": bool(getattr(args, "seal_first", False)),
                 "scope": {
                     "pid": args.pid,
                     "tail_lines": args.tail_lines,
@@ -470,13 +508,13 @@ def cmd_filter(args: argparse.Namespace) -> int:
             },
         )
         command_run.freeze_project_context(Path.cwd(), platform=platform)
-        frozen_paths = command_run.freeze_inputs(unique_paths)
+        prepared_paths = command_run.prepare_inputs(unique_paths)
         filter_dir = command_run.workspace.evidence_dir / ".filtered"
         filter_kwargs = dict(
             pattern=pattern,
             tag=tag,
             segmenter=segmenter,
-            snapshot=args.snapshot,
+            snapshot=use_snapshot,
             pid=args.pid,
             tail_lines=args.tail_lines,
             line_from=args.line_from,
@@ -498,7 +536,7 @@ def cmd_filter(args: argparse.Namespace) -> int:
             if isinstance(single_kwargs["segmenter"], list):
                 single_kwargs["segmenter"] = single_kwargs["segmenter"][0]
             result = filter_text(
-                frozen_paths[0],
+                prepared_paths[0],
                 output_path=_resolve_filter_output(
                     scenario=scenario,
                     tag=tag or "filtered",
@@ -521,7 +559,7 @@ def cmd_filter(args: argparse.Namespace) -> int:
                 )
             )
             payload["input_lineage"] = [
-                {"original": str(unique_paths[0].resolve()), "snapshot": str(frozen_paths[0])}
+                {"original": str(unique_paths[0].resolve()), "work_input": str(prepared_paths[0])}
             ]
             agent_view = _resolve_agent_view(args)
             if args.json:
@@ -534,7 +572,7 @@ def cmd_filter(args: argparse.Namespace) -> int:
             return 0 if result.match_records > 0 else 2
 
         multi = filter_texts(
-            frozen_paths,
+            prepared_paths,
             merge_timeline=bool(args.merge_timeline),
             source_labels=unique_labels or None,
             output_dir=filter_dir,
@@ -546,14 +584,14 @@ def cmd_filter(args: argparse.Namespace) -> int:
             command_run.complete(
                 verdict="passed" if multi.match_records > 0 else "failed",
                 metrics={
-                    "source_count": len(frozen_paths),
+                    "source_count": len(prepared_paths),
                     "match_records": multi.match_records,
                 },
             )
         )
         payload["input_lineage"] = [
-            {"original": str(original.resolve()), "snapshot": str(frozen)}
-            for original, frozen in zip(unique_paths, frozen_paths)
+            {"original": str(original.resolve()), "work_input": str(prepared)}
+            for original, prepared in zip(unique_paths, prepared_paths)
         ]
         agent_view = _resolve_agent_view(args)
         if args.json:
@@ -564,7 +602,7 @@ def cmd_filter(args: argparse.Namespace) -> int:
                 print(f"timeline: {multi.merged_timeline_path}")
             print(f"manifest: {payload['manifest_path']}")
         return 0 if multi.match_records > 0 else 2
-    except (FilterError, ProfileError, KnowledgeError, SessionError, RunIntegrityError, OSError) as exc:
+    except (FilterError, ProfileError, KnowledgeError, SessionError, RunIntegrityError, ArchiveError, OSError) as exc:
         failed = command_run.fail(exc) if command_run is not None else None
         print(f"错误: {exc}", file=sys.stderr)
         if failed is not None:

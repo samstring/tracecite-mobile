@@ -8,6 +8,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from .output_layout import OutputLayout, write_default_output_config
 from .constants import (
     ANDROID_ANALYSIS_OUTPUT_DIR,
     ANDROID_CAPTURE_OUTPUT_DIR,
@@ -527,18 +528,18 @@ def default_profile(platform: str = "ios") -> ProjectProfile:
             analysis={"coverage_threshold": 200, "template_threshold": 0},
             platform="ios",
         )
-    platform_root = DEFAULT_OUTPUT_ROOT_DIR / platform
+    platform_root = OutputLayout.load().output_root / platform
     return ProjectProfile(
         source_path=None,
         process_name="",
         subsystem="all",
-        log_output_dir=(platform_root / "Log").resolve(),
-        capture_output_dir=(platform_root / "Instrument").resolve(),
+        log_output_dir=(platform_root / "log").resolve(),
+        capture_output_dir=(platform_root / "instrument").resolve(),
         capture_template="default",
         attach_process="",
         scenarios={},
         filter_presets={},
-        analysis_output_dir=(platform_root / "analysis").resolve(),
+        analysis_output_dir=(platform_root / "runs").resolve(),
         analysis={"coverage_threshold": 200, "template_threshold": 0},
         platform=platform,
     )
@@ -780,6 +781,8 @@ def write_profile_template(
         raise ProfileError(f"配置文件已存在: {path}")
 
     meta_dir.mkdir(parents=True, exist_ok=True)
+    write_default_output_config()
+    OutputLayout.load().ensure_mobile(platform)
 
     if platform == "android":
         template = _android_profile_template_dict()

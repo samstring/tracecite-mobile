@@ -404,32 +404,31 @@ class CleanupTest(unittest.TestCase):
             self.assertTrue((analysis_dir / "running" / "evidence.txt").exists())
             self.assertTrue((analysis_dir / "broken" / "evidence.txt").exists())
 
-    def test_extra_project_run_root_is_cleaned_with_same_manifest_guards(self) -> None:
+    def test_project_dot_tracecite_runs_is_not_cleaned_by_default(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             log_dir, capture_dir, analysis_dir = (root / name for name in ("Log", "Instrument", "analysis"))
             project_runs = root / ".tracecite" / "runs"
             for directory in (log_dir, capture_dir, analysis_dir, project_runs):
                 directory.mkdir(parents=True)
-            completed = project_runs / "completed"
-            completed.mkdir()
-            (completed / "manifest.json").write_text(
+            stale = project_runs / "stale-run"
+            stale.mkdir()
+            (stale / "manifest.json").write_text(
                 json.dumps({"status": "completed", "retention": {"pinned": False}}),
                 encoding="utf-8",
             )
-            (completed / "evidence.txt").write_text("old\n", encoding="utf-8")
             old_ts = datetime(2026, 6, 25, 12, 0).timestamp()
-            os.utime(completed, (old_ts, old_ts))
+            os.utime(stale, (old_ts, old_ts))
             result = clean_analysis_artifacts(
                 log_dir=log_dir,
                 capture_dir=capture_dir,
                 analysis_dir=analysis_dir,
-                extra_analysis_dirs=(project_runs,),
+                extra_run_roots=(analysis_dir,),
                 before="today",
                 now=datetime(2026, 6, 26, 16, 30).astimezone(),
             )
-            self.assertIn(completed.resolve(), {item.path for item in result.items})
-            self.assertFalse(completed.exists())
+            self.assertFalse(any(item.path == stale.resolve() for item in result.items))
+            self.assertTrue(stale.exists())
 
     def test_runs_container_is_cleaned_per_run_not_as_a_whole(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

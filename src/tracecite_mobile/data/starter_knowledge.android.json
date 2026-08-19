@@ -83,7 +83,7 @@
       "name": "android-system-evidence",
       "when": "Collect bounded Android framework evidence",
       "steps": [
-        "filter --preset android-system --snapshot --last 5m",
+        "seal --from-sessions (or filter --from-sessions --seal-first) then filter --preset android-system --last 5m",
         "use android-anr, android-crash, android-memory, or android-frame for the observed fault",
         "add application operation markers through project knowledge"
       ],

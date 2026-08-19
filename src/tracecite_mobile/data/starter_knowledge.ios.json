@@ -79,8 +79,8 @@
       "name": "ios-system-evidence",
       "when": "Correlate lifecycle, memory pressure, or process termination with a bounded log window",
       "steps": [
-        "filter --preset system-lifecycle --snapshot --last 5m",
-        "filter --preset system-memory --snapshot --last 5m when memory pressure is suspected",
+        "seal --from-sessions (or filter --from-sessions --seal-first) then filter --preset system-lifecycle --last 5m",
+        "filter --preset system-memory --seal-first --last 5m when memory pressure is suspected",
         "add project markers through project knowledge when operation context is required"
       ],
       "tags": ["ios", "system"],

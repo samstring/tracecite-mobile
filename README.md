@@ -47,7 +47,8 @@ tracecite-mobile session start --date
 # ... reproduce the issue on device ...
 
 # 2. Analyze the 2-minute window around the failure
-tracecite-mobile filter --from-sessions --snapshot --last 2m --preset system-fault --json
+tracecite-mobile seal --from-sessions --json
+tracecite-mobile filter --from-sessions --last 2m --preset system-fault --json
 
 # 3. Lift raw log lines into user behavior events
 tracecite-mobile behavior summarize --from-sessions --json
@@ -61,7 +62,7 @@ management is neither required nor recommended.
 Maintenance is explicit: `clean analysis --before today` removes only old
 logs, performance outputs, and unpinned completed analysis runs. Runtime state,
 locks, active/recovery outputs, and malformed manifests are kept fail-closed.
-The default pass also inspects the project-local `.tracecite/runs` directory
+The default pass inspects `~/Documents/TraceCite/mobile/*/runs/` and per-run directories under log/instrument `.runs` containers when outputs are redirected.
 and redirected `.runs` containers under log/capture outputs, one run directory
 at a time.
 Archive evidence is excluded by default. Preview it with

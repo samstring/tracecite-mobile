@@ -2,7 +2,7 @@
 name: android-device-log
 description: >-
   使用 tracecite-mobile CLI + adb 采集 Android 真机/模拟器运行日志（adb logcat threadtime），
-  并用 filter（--snapshot / --last / --since）做通用定界分析。
+  并用 seal / filter（--seal-first / --last / --since）做通用定界分析。
   当用户要求采集/抓取/录制 Android 真机日志、运行时日志、logcat、日志排查过滤，
   或指定某台设备 serial/设备名取日志时使用。始终带 --platform android。
 ---
@@ -97,7 +97,7 @@ tracecite-mobile --platform android session start --udid <SERIAL> --date --json
 
 **重要：session 约定**
 - session 默认**长时间后台运行**，不自动 stop
-- 分析用 `filter --snapshot` 快照，不干扰正在写入的文件
+- 分析前用 `seal` 或 `filter --seal-first` 切段，不干扰正在写入的文件
 - **只在用户明确说"停止"/"关闭"时才执行 `session stop`**
 - 状态查询用 `tracecite-mobile --platform android session status --json`
 
@@ -105,19 +105,24 @@ tracecite-mobile --platform android session start --udid <SERIAL> --date --json
 
 ```bash
 # 最近 N 分钟 Android framework 状态
-tracecite-mobile --platform android filter "$LOG" --snapshot --last 5m --preset android-system --json
+tracecite-mobile --platform android seal "$LOG" --json
+tracecite-mobile --platform android filter "$LOG" --last 5m --preset android-system --json
 
-# 指定时间窗崩溃
-tracecite-mobile --platform android filter "$LOG" --snapshot --since "07-26 20:15:00" --until "07-26 20:16:00" --preset android-crash --json
+# 或一行
+tracecite-mobile --platform android filter "$LOG" --seal-first --last 5m --preset android-system --json
+
+# 指定时间窗崩溃（archive/sealed 段无需 snapshot）
+tracecite-mobile --platform android filter "$LOG" --since "07-26 20:15:00" --until "07-26 20:16:00" --preset android-crash --json
 
 # 自定义正则
-tracecite-mobile --platform android filter "$LOG" --snapshot --last 10m --grep 'SYNC_REQUEST|SYNC_SUCCESS|SYNC_FAILED' --json
+tracecite-mobile --platform android filter "$LOG" --seal-first --last 10m --grep 'SYNC_REQUEST|SYNC_SUCCESS|SYNC_FAILED' --json
 ```
 
 ### 4. 输出文件命名
 
 - **默认**：`android_live_{serial}_{YYYYMMDD_HHMMSS}.log`
-- 产物目录：`~/Desktop/TraceCite/Log/Android/`
+- 产物目录：`~/Documents/TraceCite/mobile/Android/log/`
+- 分析 run：`~/Documents/TraceCite/mobile/Android/runs/`
 
 ## 日志过滤管线
 
@@ -125,7 +130,7 @@ tracecite-mobile --platform android filter "$LOG" --snapshot --last 10m --grep '
 所有排查走同一管线，场景只换 `--preset`：
 
 ```text
-冻结(--snapshot) → 定界(--last/--since/--until) → 过滤(--preset/--grep) → JSON output_path
+seal / 定界(--last/--since/--until) → 过滤(--preset/--grep) → JSON output_path
 ```
 
 ### 内置 Android Preset
@@ -148,48 +153,25 @@ tracecite-mobile --platform android grow propose scenario task-flow --title "Tas
 # 用第二个独立案例 verify，再由不同人工审核人 promote；禁止直接 grow term/marker/learning/auto。
 tracecite-mobile --platform android grow verify kc-DEMO --case-id run-2 --outcome support --verified-by agent-b --evidence evidence://run/2#manifest
 tracecite-mobile --platform android grow promote kc-DEMO --approved-by human-reviewer
-tracecite-mobile --platform android filter "$LOG" --snapshot --last 5m --preset android-custom --scenario task-flow --json
+tracecite-mobile --platform android filter "$LOG" --seal-first --last 5m --preset android-custom --scenario task-flow --json
 ```
 
-## 结论持久化（跨 Agent 可复核）
+## 结论与证据路径
 
-每次分析完成后，**必须**将结论写入日期文件，供本 Agent 或其他 Agent 后续追溯/核实。
+分析 run 与 manifest 默认在 `~/Documents/TraceCite/mobile/Android/runs/`。回复里给 `manifest_path` 与 evidence 路径即可；不要把整份日志贴进对话。
 
-### 写入位置
-
-`~/Desktop/TraceCite/analysis/conclusions/YYYY-MM-DD.md`
-
-### 写入格式
-
-文件为**追加式**，每次分析追加一个条目（而不是覆盖），格式如下：
-
-```markdown
-## [HH:MM] <分析类型> — <简述>
-- **时间窗口**: <过滤时间范围>
-- **分析工具**: android-device-log / filter --preset ...
-- **平台**: Android
-- **结论**: <核心结论>
-- **关键证据**: <精简断言列表>
-- **源文件**:
-  - 过滤: <filtered_path>
-  - 原始: <log_path>
-```
-
-### 何时写入
-
-- 正常结论：分析完成、回复用户后，立即追加
-- 证据不足：也写入，标注「证据不足」及已试 scope/preset
+若用户要求本地归档 Markdown，可写入项目目录或 `~/Documents/TraceCite/mobile/Android/exports/`。
 
 ### 跨 Agent 使用
 
-其他 Agent（Cursor / Codex / Claude / WorkBuddy）可通过读取 `~/Desktop/TraceCite/analysis/conclusions/` 下的日期文件，快速回顾当天所有分析结论。读取时优先按日期筛选，再按时间戳定位。
+其他 Agent 应通过 `manifest_path` 与 run 目录下的 evidence 复核，不要依赖对话里的日志摘要。
 
 ## Agent 执行约定
 
 1. **必须加 `--platform android`**，不得遗漏
 2. 多台设备必须先问用户，**禁止**自动选第一台
-3. session 默认长期运行，分析用 `--snapshot`，不自动 stop
-4. 分析前必经 `filter --snapshot --json`，禁止整份读原始 `.log`
+3. session 默认长期运行，分析用 `seal` / `--seal-first`，不自动 stop
+4. 分析前必经 `seal` + `filter --json`（或 `filter --seal-first --json`），禁止整份读原始 `.log`
 5. 回复结构：结论 → 证据 → 详细输出（只给路径）
 
 ## 故障排查
