@@ -36,8 +36,8 @@ def test_loghub_android_segments_into_stable_records() -> None:
     # merge genuine continuations, so assert a strong lower bound rather than
     # coupling the regression test to every historical message body.
     assert 1500 <= len(records) <= 2000
-    assert all(record.line_start >= 1 for record in records)
-    assert all(record.line_end >= record.line_start for record in records)
+    assert all(record.start_line >= 1 for record in records)
+    assert all(record.end_line >= record.start_line for record in records)
     assert any("WindowManager" in record.text for record in records)
     assert any("ActivityManager" in record.text for record in records)
 
