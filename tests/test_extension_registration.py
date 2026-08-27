@@ -33,6 +33,7 @@ def test_importing_mobile_has_no_core_registration_side_effect() -> None:
 def test_explicit_registration_is_complete_and_idempotent() -> None:
     result = _run_isolated(
         """
+        from tracecite import list_capabilities
         from tracecite.extension import ExtensionAPI, available_runtimes, get_runtime
         from tracecite_core.segmenter import available_segmenters
         from tracecite_mobile.analysis.scenario_runtime import MOBILE_RUNTIME
@@ -40,6 +41,7 @@ def test_explicit_registration_is_complete_and_idempotent() -> None:
 
         assert "devicelog" not in available_segmenters()
         assert available_runtimes() == ["default"]
+        assert not [item for item in list_capabilities() if item.name.startswith("mobile.")]
 
         register(ExtensionAPI())
         register(ExtensionAPI())
@@ -50,6 +52,9 @@ def test_explicit_registration_is_complete_and_idempotent() -> None:
         }
         assert expected <= set(available_segmenters())
         assert get_runtime("mobile") is MOBILE_RUNTIME
+        capabilities = {item.name: item for item in list_capabilities()}
+        assert capabilities["mobile.devices.list"].safety == "live_source"
+        assert capabilities["mobile.sessions.list"].safety == "live_source"
         """
     )
 
