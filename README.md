@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>The official Mobile domain adapter for the TraceCite agent context gateway.</strong>
+  <strong>The official Mobile domain extension for the TraceCite agent context gateway.</strong>
 </p>
 
 <p align="center">
@@ -17,26 +17,25 @@
 
 ## The Problem
 
-Four things that make mobile debugging harder than it should be:
+Four things make mobile debugging harder than it should be:
 
-**Logs are after the fact.** The issue happens on a device, but you can only export logs afterward from an IDE. The context around the failure moment is already gone.
+**Logs are after the fact.** The issue happens on a device, but you often export logs only afterward. The context around the failure moment may already be gone.
 
-**Logs and user actions speak different languages.** The log says `"[1234]: [UI] button tapped: checkout"`, but you need to answer "what was the user doing before the crash?"
+**Logs and user actions speak different languages.** A raw line can say that a button was tapped, while the investigation needs a structured answer about what the user was doing before a crash or hang.
 
-**Lag needs more than logs.** The app froze — logs alone don't show whether it's a main thread block or memory pressure. You need a performance trace, but setting up xctrace or Perfetto by hand is tedious.
+**Lag needs more than logs.** A freeze may require performance traces, process state, and logs together rather than a single text stream.
 
-**Every investigation starts from scratch.** Same app, similar issue — you're re-inventing what keywords to search, what metrics to check. Nothing carries over.
+**Every investigation starts from scratch.** Similar incidents repeatedly require the same presets, evidence collection, and validation steps unless those domain semantics are reusable.
 
 ## Install
 
 ```bash
-# Install the main TraceCite distribution, then the Mobile extension
 pip install tracecite
 pip install tracecite-mobile
 tracecite-mobile profile init
 ```
 
-iOS needs `idevicesyslog` (libimobiledevice) + Xcode CLT. Android needs `adb` (SDK Platform Tools).
+iOS needs `idevicesyslog` (libimobiledevice) plus Xcode CLT. Android needs `adb` from the SDK Platform Tools.
 
 ## Usage
 
@@ -46,47 +45,39 @@ tracecite-mobile session start --date
 
 # ... reproduce the issue on device ...
 
-# 2. Analyze the 2-minute window around the failure
+# 2. Analyze the failure window
 tracecite-mobile seal --from-sessions --json
 tracecite-mobile filter --from-sessions --last 2m --preset system-fault --json
 
-# 3. Lift raw log lines into user behavior events
+# 3. Lift raw lines into structured behavior events
 tracecite-mobile behavior summarize --from-sessions --json
 ```
 
-Live logs keep a 30-minute hot window. Active collectors perform one archive
-check every 30 minutes and move expired records into the hidden internal
-`.archive/` store. Use `archive list` and `archive pull`; direct folder
-management is neither required nor recommended.
+Live logs keep a 30-minute hot window. Active collectors periodically archive expired records into the hidden internal `.archive/` store. Use `archive list` and `archive pull`; direct folder management is not required.
 
-Maintenance is explicit: `clean analysis --before today` removes only old
-logs, performance outputs, and unpinned completed analysis runs. Runtime state,
-locks, active/recovery outputs, and malformed manifests are kept fail-closed.
-The default pass inspects `~/Documents/TraceCite/mobile/*/runs/` and per-run directories under log/instrument `.runs` containers when outputs are redirected.
-and redirected `.runs` containers under log/capture outputs, one run directory
-at a time.
-Archive evidence is excluded by default. Preview it with
-`clean analysis --include-archive --dry-run`; an actual archive deletion
-requires both `--include-archive --yes`.
+Maintenance is explicit. `clean analysis --before today` removes only old logs, performance outputs, and unpinned completed analysis runs. Runtime state, locks, active/recovery outputs, and malformed manifests remain fail-closed. Archive evidence is excluded by default; preview it with `--include-archive --dry-run`, and actual archive deletion additionally requires `--yes`.
 
-After one full investigation, the agent has:
+After one full investigation, the Agent can have:
 
-- **Structured hits within a time window** — which line, what time, what keyword matched
-- **User behavior event stream** — "user opened settings → tapped save → app froze"
-- **A complete run record** — input frozen, parameters recorded, reproducible any time
+- structured hits within a bounded time window;
+- a user-behavior event stream;
+- immutable Evidence references and Coverage;
+- a complete run record with frozen input and parameters.
+
+For performance investigations:
 
 ```bash
-# Lag issue? Record a performance trace alongside
 tracecite-mobile capture start --template "Time Profiler"
 # ... reproduce the lag ...
-tracecite-mobile capture stop    # → auto trace file + hang summary
+tracecite-mobile capture stop
+```
 
-# Forget what to search for? Use presets
+Reusable presets remain domain-owned:
+
+```bash
 tracecite-mobile filter app.log --preset system-lifecycle --json
 tracecite-mobile filter app.log --preset network-http --json
 tracecite-mobile filter app.log --preset memory-leak --json
-
-# Add incident-specific terms without discarding the reusable preset (OR semantics)
 tracecite-mobile filter app.log --preset network-http --grep 'checkout|payment' --json
 ```
 
@@ -94,58 +85,80 @@ tracecite-mobile filter app.log --preset network-http --grep 'checkout|payment' 
 
 | | Raw logs to AI | TraceCite Mobile |
 |---|---|---|
-| Collection | Manually export from IDE after the fact | Real-time background capture; failure window not lost |
-| Data types | Text logs only | Logs + performance traces; one command records both |
-| Output format | Raw text; AI parses on its own | Structured JSON + user behavior events |
-| User actions | AI infers from log strings | Auto-lifted into structured behavior events |
-| Knowledge reuse | None | Auditable project-local presets and candidate terms |
-| Reproducibility | Different steps across runs | Full run manifest records all parameters, input frozen |
+| Collection | Manual export after the fact | Background capture and bounded incident windows |
+| Data types | Usually text only | Logs + performance/device capabilities |
+| Output | Raw text | Structured results + Evidence/Coverage |
+| User actions | Model infers from strings | Domain events can be lifted deterministically |
+| Knowledge reuse | Ad hoc | Governed presets and knowledge candidates |
+| Reproducibility | Steps vary | Frozen evidence and run manifests |
 
 ## Architecture
 
-The main TraceCite distribution provides Core evidence primitives, the generic
-Runtime, and the versioned Extension API. Mobile stays independent and
-registers its device adapters and domain semantics through
-`tracecite.extensions`:
+TraceCite Mobile is a **declarative Extension Protocol v2 package**. It does not define a second general-purpose Runtime and does not require TraceCite Core to import Mobile.
 
 ```text
-External Agent
-      |
-TraceCite Runtime ---- tracecite-mobile
-      |
-TraceCite Core
+External Agent / CLI / MCP
+          |
+   TraceCite Runtime
+          |
+Extension Protocol v2
+          |
+   tracecite-mobile
+   /       |        \
+Core     Agent     Scenario
+plugins  capabilities capability
 ```
 
-Importing either `tracecite` or `tracecite_mobile` does not register Mobile
-formats or mutate the Core registry. Use
-`tracecite extension load` or `tracecite run ... --load-extensions --runtime mobile`
-when the main Runtime should discover the installed Mobile extension.
-The standalone `tracecite-mobile` CLI explicitly hosts the same extension
-before dispatching a command.
+The package publishes one `TraceCiteExtension` with an `ExtensionManifest` and independently versionable capabilities:
+
+- `core.plugins` registers Mobile formats/segmenters;
+- `agent.capability` exposes device, process, session, and app operations through the generic TraceCite Capability Registry;
+- `runtime.scenario` supplies Mobile profile/preset/scenario hooks to the generic Runtime.
+
+`ScenarioRuntime` is retained only as a compatibility/internal adapter for callers that still construct it directly. It is not the Extension Protocol v2 boundary.
+
+Importing `tracecite` or `tracecite_mobile` does not mutate Core registries. Explicit hosts install the extension by loading the `tracecite.extensions` entry point or by calling `tracecite_mobile.extension.register()`.
+
+```bash
+tracecite extension load
+tracecite run scenario.json --load-extensions --runtime mobile
+```
+
+The `--runtime mobile` command remains an operational compatibility route: Core adapts the published `ScenarioCapability` to its current scenario executor internally. Domain packages should depend on the declarative capability contract rather than `register_runtime` or `ExtensionAPI`.
+
+The standalone `tracecite-mobile` CLI explicitly installs the same declarative extension before dispatching a command.
 
 <img src="architecture.svg" alt="Mobile architecture: Device, Analysis, Knowledge, Plugin layers on Core" width="100%"/>
 
-`--platform ios|android` switches backends through the same capability contract.
-Use `performance profiles` to discover supported profiles; optional operations
-fail explicitly when a backend does not declare them.
+`--platform ios|android` switches backends through the same Mobile capability contract. Optional operations fail explicitly when a backend does not declare them.
 
 ```bash
 tracecite-mobile --platform ios performance profiles --json
 tracecite-mobile --platform android performance start --profile frame --json
 ```
 
+## Agent capabilities and safety
+
+Mobile publishes read, live-source, and live-action capabilities. TraceCite Runtime owns the safety gate; installing Mobile does not itself authorize device reads or mutations.
+
+Examples include:
+
+- `mobile.environment.probe` — read;
+- `mobile.devices.list` / `mobile.processes.list` / `mobile.sessions.list` — live source;
+- `mobile.sessions.start` / `mobile.sessions.stop` / `mobile.app.launch` — live action and explicit authorization required.
+
+MCP or another Agent host may expose these through the generic Capability Registry without importing Mobile internals.
+
 ## Customization
 
-**Presets.** Stop writing regex every time. Pre-built keyword sets for common scenarios:
+**Presets.** Reuse project/domain filters instead of rewriting regex each time:
 
 ```bash
-tracecite-mobile filter app.log --preset system-lifecycle --json
-tracecite-mobile filter app.log --preset network-http --grep 'checkout|payment' --json
 tracecite-mobile grow propose term my-preset "payment failed" "network timeout" \
   --created-by agent-a --case-id run-001 --evidence evidence://run/001#manifest
 ```
 
-**Scenario files.** Save investigation steps as JSON — team-sharable, version-controllable:
+**Scenario files.** Save repeatable investigation recipes as JSON:
 
 ```json
 {
@@ -169,9 +182,7 @@ tracecite-mobile grow propose term my-preset "payment failed" "network timeout" 
 tracecite-mobile scenario run crash-investigation.json
 ```
 
-**Knowledge governance.** Agent findings first enter a physically separate
-candidate store. A second independent case verifies them; a different reviewer
-then authorizes promotion:
+**Knowledge governance.** Agent findings first enter a physically separate candidate store. An independent case verifies them and a different reviewer authorizes promotion:
 
 ```bash
 tracecite-mobile grow suggest app.log --preset my-app
@@ -183,14 +194,16 @@ tracecite-mobile grow promote kc-ID --approved-by human-reviewer
 tracecite-mobile grow doctor
 ```
 
-Legacy direct writes (`preset add`, `grow term/marker/learning/playbook/auto`)
-are rejected by the Agent CLI. Candidate and trusted knowledge stay in separate
-files under `.tracecite/`; nothing is uploaded. A changed trusted file fails its
-integrity gate until restored through the governed workflow.
+Legacy direct writes are rejected by the Agent CLI. Candidate and trusted knowledge stay separate; a modified trusted file fails its integrity gate until restored through the governed workflow.
+
+## Development status
+
+The `refactor/agent-v2` branch is validated against the matching TraceCite Core branch. The automated matrix covers Python 3.10–3.14 and macOS, builds the distribution, and includes pinned real-log regression using Loghub samples.
 
 ## See Also
 
-- [**TraceCite**](../tracecite-core/) — main distribution: Core, Runtime, and Extension API.
+- **TraceCite Core** — generic Evidence/Runtime, Extension Protocol v2, Context Engine, and Agent integration.
+- **TraceCite MCP** — generic MCP projection of TraceCite tools and Extension v2 capabilities.
 
 ## License
 

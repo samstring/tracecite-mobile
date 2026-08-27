@@ -1,22 +1,41 @@
-"""Official Mobile domain extension for the public TraceCite Runtime."""
+"""Official Mobile domain extension for TraceCite Extension Protocol v2."""
 
 from __future__ import annotations
 
-from tracecite.extension import ExtensionAPI
+from tracecite.extension import (
+    CorePluginCapability,
+    ExtensionManifest,
+    TraceCiteExtension,
+    register_extension,
+)
 
-from .analysis.scenario_runtime import MOBILE_RUNTIME
-from .capabilities import register_capabilities
+from .analysis.scenario_runtime import MOBILE_SCENARIO_CAPABILITY
+from .capabilities import agent_capabilities
 from .plugins import register_all
 
 
-TRACECITE_EXTENSION_API = "1"
+EXTENSION = TraceCiteExtension(
+    manifest=ExtensionManifest(
+        id="mobile",
+        version="0.1.0",
+        domain="mobile",
+        description="iOS and Android evidence collection and investigation capabilities.",
+    ),
+    capabilities=(
+        CorePluginCapability(name="mobile.formats", register=register_all),
+        *agent_capabilities(),
+        MOBILE_SCENARIO_CAPABILITY,
+    ),
+)
+
+# Alias supported by the Core v2 loader when entry points return this module.
+extension = EXTENSION
 
 
-def register(api: ExtensionAPI) -> None:
-    """Register Mobile capabilities without modifying the TraceCite package."""
-    register_all(api)
-    register_capabilities(api)
-    api.register_runtime("mobile", MOBILE_RUNTIME)
+def register() -> TraceCiteExtension:
+    """Explicitly install the declarative Mobile extension in this process."""
+
+    return register_extension(EXTENSION)
 
 
-__all__ = ["TRACECITE_EXTENSION_API", "register"]
+__all__ = ["EXTENSION", "extension", "register"]

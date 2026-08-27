@@ -49,19 +49,25 @@ def test_mobile_scenario_compatibility_imports_use_runtime_implementation() -> N
     assert mobile_validate is runtime_validate
 
 
-def test_mobile_registers_through_public_extension_api() -> None:
-    from tracecite.extension import ExtensionAPI, get_runtime
+def test_mobile_declares_public_extension_protocol_v2() -> None:
+    from tracecite.extension import get_runtime, list_extensions
     from tracecite.runtime import DEFAULT_RUNTIME
-    from tracecite_mobile.analysis.scenario_runtime import MOBILE_RUNTIME
-    from tracecite_mobile.extension import TRACECITE_EXTENSION_API, register
+    from tracecite_mobile.analysis.scenario_runtime import MOBILE_SCENARIO_CAPABILITY
+    from tracecite_mobile.extension import EXTENSION, register
 
-    assert TRACECITE_EXTENSION_API == "1"
+    assert EXTENSION.manifest.protocol_version == "2"
+    assert EXTENSION.manifest.id == "mobile"
     assert DEFAULT_RUNTIME.allow_live_source is False
     assert DEFAULT_RUNTIME.allow_actions is False
+    assert MOBILE_SCENARIO_CAPABILITY.kind == "runtime.scenario"
 
-    register(ExtensionAPI())
+    assert register() is EXTENSION
 
-    assert get_runtime("mobile") is MOBILE_RUNTIME
+    runtime = get_runtime("mobile")
+    assert runtime.allow_live_source is True
+    assert runtime.allow_actions is True
+    installed = {item["id"]: item for item in list_extensions()}
+    assert installed["mobile"]["protocol_version"] == "2"
 
 
 def test_builtin_formats_do_not_force_replace_core_registrations() -> None:

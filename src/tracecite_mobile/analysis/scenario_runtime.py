@@ -1,4 +1,4 @@
-"""Mobile adapter for the generic :mod:`tracecite.runtime` engine."""
+"""Mobile scenario hooks for the generic :mod:`tracecite.runtime` engine."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import importlib.metadata
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from tracecite.extension import ScenarioCapability
 from tracecite.runtime import ScenarioRuntime
 
 
@@ -59,6 +60,19 @@ def _runtime_versions() -> Mapping[str, str]:
     return {"tracecite_mobile": version}
 
 
+MOBILE_SCENARIO_CAPABILITY = ScenarioCapability(
+    name="mobile",
+    load_profile=_load_profile,
+    resolve_scenario_pattern=_resolve_scenario_pattern,
+    context_files=_context_files,
+    loaded_plugins=_loaded_plugins,
+    runtime_versions=_runtime_versions,
+    allow_live_source=True,
+    allow_actions=True,
+)
+
+# Compatibility export for callers that still construct the internal adapter
+# directly. Protocol v2 extensions publish MOBILE_SCENARIO_CAPABILITY instead.
 MOBILE_RUNTIME = ScenarioRuntime(
     load_profile=_load_profile,
     resolve_scenario_pattern=_resolve_scenario_pattern,
@@ -68,3 +82,6 @@ MOBILE_RUNTIME = ScenarioRuntime(
     allow_live_source=True,
     allow_actions=True,
 )
+
+
+__all__ = ["MOBILE_RUNTIME", "MOBILE_SCENARIO_CAPABILITY"]
