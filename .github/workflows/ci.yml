@@ -51,3 +51,43 @@ jobs:
       - name: Build source and wheel distributions
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.14'
         run: python -m build
+
+  real-log-regression:
+    name: real log regression (Loghub)
+    runs-on: ubuntu-latest
+    env:
+      LOGHUB_COMMIT: dd61d0952749ee7963bde24220d1be5ede023033
+      TRACECITE_REAL_LOGS: '1'
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
+      - name: Install TraceCite Core from feature branch
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          python -m pip install "git+https://github.com/samstring/tracecite-core.git@feature_for_agent"
+          python -m pip install -e ".[dev]"
+
+      - name: Download pinned Loghub samples into runner temp
+        shell: bash
+        run: |
+          set -euo pipefail
+          LOGHUB_DIR="$RUNNER_TEMP/loghub"
+          mkdir -p "$LOGHUB_DIR"
+          base="https://raw.githubusercontent.com/logpai/loghub/$LOGHUB_COMMIT"
+          curl --fail --location --retry 3 "$base/Android/Android_2k.log" -o "$LOGHUB_DIR/Android_2k.log"
+          curl --fail --location --retry 3 "$base/HealthApp/HealthApp_2k.log" -o "$LOGHUB_DIR/HealthApp_2k.log"
+          curl --fail --location --retry 3 "$base/Apache/Apache_2k.log" -o "$LOGHUB_DIR/Apache_2k.log"
+          test -s "$LOGHUB_DIR/Android_2k.log"
+          test -s "$LOGHUB_DIR/HealthApp_2k.log"
+          test -s "$LOGHUB_DIR/Apache_2k.log"
+          echo "LOGHUB_DIR=$LOGHUB_DIR" >> "$GITHUB_ENV"
+
+      - name: Run real-log regressions
+        run: python -m pytest -q tests/test_real_log_regression.py
