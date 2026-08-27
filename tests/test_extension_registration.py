@@ -53,8 +53,19 @@ def test_explicit_registration_is_complete_and_idempotent() -> None:
         assert expected <= set(available_segmenters())
         assert get_runtime("mobile") is MOBILE_RUNTIME
         capabilities = {item.name: item for item in list_capabilities()}
+
+        assert capabilities["mobile.environment.probe"].safety == "read"
         assert capabilities["mobile.devices.list"].safety == "live_source"
+        assert capabilities["mobile.processes.list"].safety == "live_source"
         assert capabilities["mobile.sessions.list"].safety == "live_source"
+
+        for name in (
+            "mobile.sessions.start",
+            "mobile.sessions.stop",
+            "mobile.app.launch",
+        ):
+            assert capabilities[name].safety == "live_action"
+            assert capabilities[name].requires_authorization is True
         """
     )
 
