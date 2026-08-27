@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping
 
 from tracecite import CapabilitySpec
-from tracecite.extension import ExtensionAPI
+from tracecite.extension import AgentCapability
 
 from .device_api import get_backend
 
@@ -132,8 +132,8 @@ _DEVICE_SCHEMA = {
 }
 
 
-def register_capabilities(api: ExtensionAPI) -> None:
-    specs = [
+def _capability_entries():
+    return (
         (
             CapabilitySpec(
                 name="mobile.environment.probe",
@@ -264,12 +264,27 @@ def register_capabilities(api: ExtensionAPI) -> None:
             ),
             launch_app,
         ),
-    ]
-    for spec, executor in specs:
-        api.register_capability(spec, executor)
+    )
+
+
+def agent_capabilities() -> tuple[AgentCapability, ...]:
+    """Return declarative Protocol v2 capabilities without mutating Runtime state."""
+
+    return tuple(
+        AgentCapability(spec=spec, executor=executor)
+        for spec, executor in _capability_entries()
+    )
+
+
+def register_capabilities(api: Any) -> None:
+    """Compatibility helper for older embedding tests; v2 extensions do not call it."""
+
+    for capability in agent_capabilities():
+        api.register_capability(capability.spec, capability.executor)
 
 
 __all__ = [
+    "agent_capabilities",
     "launch_app",
     "list_devices",
     "list_log_sessions",
