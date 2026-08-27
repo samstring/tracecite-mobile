@@ -6,25 +6,27 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
+
+from tracecite.knowledge import KnowledgeGovernanceError
 
 from ..analysis.knowledge import (
     KnowledgeError,
-    add_behavior_marker,
-    add_learning,
-    add_playbook,
-    apply_grow_suggestions,
     audit_filter_terms,
-    ensure_scenario,
     load_project_knowledge,
-    remove_behavior_marker,
     suggest_grow_terms,
+)
+from ..analysis.knowledge_governance import (
+    MOBILE_CANDIDATE_KINDS,
+    check_mobile_knowledge_integrity,
+    list_mobile_candidates,
+    promote_mobile_knowledge,
+    propose_mobile_knowledge,
+    verify_mobile_knowledge,
 )
 from ..shared.config import (
     ProfileError,
-    append_filter_preset_terms,
     load_project_profile,
-    remove_filter_preset_terms,
 )
 
 
@@ -39,7 +41,7 @@ def register_knowledge_commands(sub: argparse._SubParsersAction) -> None:
     preset_list.add_argument("--json", action="store_true", help="以 JSON 输出")
     preset_add = preset_sub.add_parser(
         "add",
-        help="向当前平台的 .tracecite/knowledge.<platform>.json 追加关键词",
+        help="已禁用：请使用 grow propose term",
     )
     preset_add.add_argument("name", help="preset 名，如 user-behavior / network-http")
     preset_add.add_argument(
@@ -59,7 +61,7 @@ def register_knowledge_commands(sub: argparse._SubParsersAction) -> None:
     grow_show.add_argument("--scenario", help="只显示某个业务场景")
     grow_show.add_argument("--json", action="store_true", help="以 JSON 输出")
     grow_scenario = grow_sub.add_parser(
-        "scenario", help="创建/更新业务场景（AI 查到新业务场景时先建壳）"
+        "scenario", help="已禁用：请使用 grow propose scenario"
     )
     grow_scenario.add_argument(
         "id", help="场景 id，通用短横线命名，如 feature-flow / pay-checkout"
@@ -68,14 +70,14 @@ def register_knowledge_commands(sub: argparse._SubParsersAction) -> None:
     grow_scenario.add_argument("--note", default="", help="备注")
     grow_scenario.add_argument("--tags", nargs="*", default=[], help="标签")
     grow_scenario.add_argument("--json", action="store_true")
-    grow_term = grow_sub.add_parser("term", help="追加或删除过滤词（--remove 为裁剪）")
+    grow_term = grow_sub.add_parser("term", help="已禁用：请使用 grow propose term")
     grow_term.add_argument("preset", help="preset 名，如 user-behavior")
     grow_term.add_argument("terms", nargs="+", help="关键词")
     grow_term.add_argument("--scenario", help="写入/裁剪业务场景（默认全局）")
     grow_term.add_argument("--remove", action="store_true", help="删除这些词（默认是追加）")
     grow_term.add_argument("--json", action="store_true")
     grow_marker = grow_sub.add_parser(
-        "marker", help="追加或删除行为摘要 marker（--remove 为裁剪）"
+        "marker", help="已禁用：请使用 grow propose marker"
     )
     grow_marker.add_argument("needle", help="日志中匹配的原文片段")
     grow_marker.add_argument("--category", default="marker", help="分类名")
@@ -85,13 +87,13 @@ def register_knowledge_commands(sub: argparse._SubParsersAction) -> None:
         "--remove", action="store_true", help="按 needle 删除 marker（默认是追加）"
     )
     grow_marker.add_argument("--json", action="store_true")
-    grow_learning = grow_sub.add_parser("learning", help="追加一条排查经验")
+    grow_learning = grow_sub.add_parser("learning", help="已禁用：请使用 grow propose learning")
     grow_learning.add_argument("summary", help="经验摘要")
     grow_learning.add_argument("--tags", nargs="*", default=[], help="标签")
     grow_learning.add_argument("--evidence", default="", help="证据路径或短引")
     grow_learning.add_argument("--scenario", help="写入业务场景")
     grow_learning.add_argument("--json", action="store_true")
-    grow_playbook = grow_sub.add_parser("playbook", help="追加/更新可复用排查步骤")
+    grow_playbook = grow_sub.add_parser("playbook", help="已禁用：请使用 grow propose playbook")
     grow_playbook.add_argument("name", help="playbook 名")
     grow_playbook.add_argument("--when", default="", help="何时使用")
     grow_playbook.add_argument("--step", action="append", default=[], dest="steps")
@@ -117,7 +119,7 @@ def register_knowledge_commands(sub: argparse._SubParsersAction) -> None:
     grow_suggest.add_argument("--limit", type=int, default=12, help="最多输出候选数（默认 12）")
     grow_suggest.add_argument("--json", action="store_true")
     grow_auto = grow_sub.add_parser(
-        "auto", help="按阈值把高频候选自动沉淀进知识库（自成长闭环；默认只加行为 marker）"
+        "auto", help="已禁用：suggest 后必须 propose/verify/promote"
     )
     grow_auto.add_argument("log_path", help="原始或 filtered/snapshot 日志路径")
     grow_auto.add_argument("--preset", default="user-behavior", help="preset 名（默认 user-behavior）")
@@ -129,6 +131,123 @@ def register_knowledge_commands(sub: argparse._SubParsersAction) -> None:
     )
     grow_auto.add_argument("--dry-run", action="store_true", help="只输出将沉淀的清单，不写盘")
     grow_auto.add_argument("--json", action="store_true")
+
+    propose = grow_sub.add_parser(
+        "propose",
+        help="把知识写入独立候选库；不会修改正式知识",
+    )
+    propose_sub = propose.add_subparsers(dest="proposal_kind", required=True)
+
+    def add_evidence_gate(parser: argparse.ArgumentParser, *, scenario: bool = True) -> None:
+        parser.add_argument("--created-by", required=True, help="候选创建者/Agent id")
+        parser.add_argument("--case-id", required=True, help="独立案例 id")
+        parser.add_argument(
+            "--evidence",
+            action="append",
+            required=True,
+            help="Evidence/Manifest 引用；可重复传入",
+        )
+        if scenario:
+            parser.add_argument("--scenario", help="候选所属业务场景")
+        parser.add_argument("--json", action="store_true")
+
+    propose_term = propose_sub.add_parser("term", help="提出过滤词候选")
+    propose_term.add_argument("preset")
+    propose_term.add_argument("terms", nargs="+")
+    add_evidence_gate(propose_term)
+
+    propose_marker = propose_sub.add_parser("marker", help="提出行为 marker 候选")
+    propose_marker.add_argument("needle")
+    propose_marker.add_argument("--category", default="marker")
+    propose_marker.add_argument("--label", default="")
+    add_evidence_gate(propose_marker)
+
+    propose_learning = propose_sub.add_parser("learning", help="提出排查经验候选")
+    propose_learning.add_argument("summary")
+    propose_learning.add_argument("--tags", nargs="*", default=[])
+    add_evidence_gate(propose_learning)
+
+    propose_playbook = propose_sub.add_parser("playbook", help="提出 playbook 候选")
+    propose_playbook.add_argument("name")
+    propose_playbook.add_argument("--when", default="")
+    propose_playbook.add_argument("--step", action="append", default=[], dest="steps")
+    propose_playbook.add_argument("--tags", nargs="*", default=[])
+    propose_playbook.add_argument("--presets", nargs="*", default=[], dest="related_presets")
+    add_evidence_gate(propose_playbook)
+
+    propose_scenario = propose_sub.add_parser("scenario", help="提出业务场景候选")
+    propose_scenario.add_argument("id")
+    propose_scenario.add_argument("--title", default="")
+    propose_scenario.add_argument("--note", default="")
+    propose_scenario.add_argument("--tags", nargs="*", default=[])
+    add_evidence_gate(propose_scenario, scenario=False)
+
+    verify = grow_sub.add_parser("verify", help="用另一个独立案例验证候选")
+    verify.add_argument("candidate_id")
+    verify.add_argument("--case-id", required=True)
+    verify.add_argument("--outcome", choices=("support", "contradict"), required=True)
+    verify.add_argument("--evidence", action="append", required=True)
+    verify.add_argument("--verified-by", required=True)
+    verify.add_argument("--note", default="")
+    verify.add_argument("--json", action="store_true")
+
+    promote = grow_sub.add_parser(
+        "promote", help="经独立人工审核后把 verified 候选写入正式知识"
+    )
+    promote.add_argument("candidate_id")
+    promote.add_argument("--approved-by", required=True)
+    promote.add_argument("--json", action="store_true")
+
+    candidates = grow_sub.add_parser("candidates", help="查看候选知识及状态")
+    candidates.add_argument(
+        "--status", choices=("candidate", "verified", "contradicted", "promoted")
+    )
+    candidates.add_argument("--json", action="store_true")
+
+    doctor = grow_sub.add_parser("doctor", help="检查正式知识是否被绕过 promotion 修改")
+    doctor.add_argument("--json", action="store_true")
+
+
+_DIRECT_WRITE_COMMANDS = {
+    "scenario",
+    "term",
+    "marker",
+    "learning",
+    "playbook",
+    "auto",
+}
+
+
+def _proposal_payload(args: argparse.Namespace) -> Dict[str, Any]:
+    kind = args.proposal_kind
+    if kind == "term":
+        return {"preset": args.preset, "terms": list(args.terms)}
+    if kind == "marker":
+        return {
+            "needle": args.needle,
+            "category": args.category,
+            "label": args.label,
+        }
+    if kind == "learning":
+        return {"summary": args.summary, "tags": list(args.tags)}
+    if kind == "playbook":
+        return {
+            "name": args.name,
+            "when": args.when,
+            "steps": list(args.steps),
+            "tags": list(args.tags),
+            "related_presets": list(args.related_presets),
+        }
+    if kind == "scenario":
+        return {
+            "id": args.id,
+            "title": args.title,
+            "note": args.note,
+            "tags": list(args.tags),
+        }
+    raise KnowledgeGovernanceError(
+        f"不支持的 Mobile 候选 kind: {kind!r}（可用: {', '.join(MOBILE_CANDIDATE_KINDS)}）"
+    )
 
 
 def cmd_grow(args: argparse.Namespace) -> int:
@@ -199,61 +318,53 @@ def cmd_grow(args: argparse.Namespace) -> int:
                 print(f"  - {sid}: {scenario.get('title') or sid}")
             return 0
 
-        if args.grow_command == "scenario":
-            result = ensure_scenario(
-                args.id,
-                title=args.title,
+        if args.grow_command in _DIRECT_WRITE_COMMANDS:
+            raise KnowledgeGovernanceError(
+                "Agent CLI 已禁止直接修改正式知识。请使用 grow propose，"
+                "再经过 grow verify 与 grow promote。"
+            )
+        if args.grow_command == "propose":
+            result = propose_mobile_knowledge(
+                kind=args.proposal_kind,
+                payload=_proposal_payload(args),
+                created_by=args.created_by,
+                case_id=args.case_id,
+                evidence_refs=args.evidence,
+                start_dir=Path.cwd(),
+                platform=args.platform,
+                scenario=getattr(args, "scenario", None),
+            )
+        elif args.grow_command == "verify":
+            result = verify_mobile_knowledge(
+                args.candidate_id,
+                case_id=args.case_id,
+                outcome=args.outcome,
+                evidence_refs=args.evidence,
+                verified_by=args.verified_by,
                 note=args.note,
-                tags=args.tags,
                 start_dir=Path.cwd(),
-                platform=getattr(args, "platform", "ios"),
-            )
-        elif args.grow_command == "term":
-            mutate = remove_filter_preset_terms if args.remove else append_filter_preset_terms
-            result = mutate(
-                args.preset,
-                args.terms,
-                start_dir=Path.cwd(),
-                scenario=getattr(args, "scenario", None),
                 platform=args.platform,
             )
-        elif args.grow_command == "marker":
-            if args.remove:
-                result = remove_behavior_marker(
-                    args.needle,
-                    start_dir=Path.cwd(),
-                    scenario=getattr(args, "scenario", None),
-                    platform=args.platform,
-                )
-            else:
-                result = add_behavior_marker(
-                    args.needle,
-                    category=args.category,
-                    label=args.label,
-                    start_dir=Path.cwd(),
-                    scenario=getattr(args, "scenario", None),
-                    platform=args.platform,
-                )
-        elif args.grow_command == "learning":
-            result = add_learning(
-                args.summary,
-                tags=args.tags,
-                evidence=args.evidence,
+        elif args.grow_command == "promote":
+            result = promote_mobile_knowledge(
+                args.candidate_id,
+                approved_by=args.approved_by,
                 start_dir=Path.cwd(),
-                scenario=getattr(args, "scenario", None),
                 platform=args.platform,
             )
-        elif args.grow_command == "playbook":
-            result = add_playbook(
-                args.name,
-                when=args.when,
-                steps=args.steps,
-                tags=args.tags,
-                related_presets=args.related_presets,
-                start_dir=Path.cwd(),
-                scenario=getattr(args, "scenario", None),
+        elif args.grow_command == "candidates":
+            result = list_mobile_candidates(
+                Path.cwd(),
                 platform=args.platform,
+                status=args.status or "",
             )
+        elif args.grow_command == "doctor":
+            result = check_mobile_knowledge_integrity(
+                Path.cwd(), platform=args.platform
+            )
+            if result["status"] != "ok":
+                print(json.dumps(result, ensure_ascii=False, indent=2))
+                return 2
         elif args.grow_command == "audit":
             result = audit_filter_terms(
                 Path(args.log_path),
@@ -288,30 +399,17 @@ def cmd_grow(args: argparse.Namespace) -> int:
                 print(f"（已排除词表+marker {result['existing_excluded']} 个；候选仅建议，不写盘）")
                 for candidate in result.get("candidates") or []:
                     print(f"  [{candidate['count']:>5}] {candidate['kind']:<6} {candidate['token']}")
-                print("用法: grow auto <log> --preset <p> [--min-count N] 一键沉淀为 marker；")
-                print("      --dry-run 先看将沉淀清单；--terms 额外加进词表")
+                print("候选不会自动写入正式知识。请用 grow propose 提案并绑定 Evidence。")
                 return 0
-        elif args.grow_command == "auto":
-            result = apply_grow_suggestions(
-                Path(args.log_path),
-                preset=args.preset,
-                scenario=getattr(args, "scenario", None),
-                start_dir=Path.cwd(),
-                platform=args.platform,
-                min_count=args.min_count,
-                limit=args.limit,
-                add_terms=args.terms,
-                dry_run=args.dry_run,
-            )
         else:
             print(f"错误: 未知 grow 子命令: {args.grow_command}", file=sys.stderr)
             return 1
 
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0
-    except (KnowledgeError, ProfileError) as exc:
+    except (KnowledgeError, ProfileError, KnowledgeGovernanceError) as exc:
         print(f"错误: {exc}", file=sys.stderr)
-        return 1
+        return 2 if isinstance(exc, KnowledgeGovernanceError) else 1
 
 
 def cmd_preset(args: argparse.Namespace) -> int:
@@ -337,32 +435,16 @@ def cmd_preset(args: argparse.Namespace) -> int:
             return 0
 
         if args.preset_command == "add":
-            result = append_filter_preset_terms(
-                args.name,
-                args.terms,
-                start_dir=Path.cwd(),
-                note=args.note,
-                platform=args.platform,
+            raise KnowledgeGovernanceError(
+                "Agent CLI 已禁止 preset add 直接修改正式知识。"
+                "请使用 grow propose term。"
             )
-            if args.json:
-                print(json.dumps(result, ensure_ascii=False, indent=2))
-            else:
-                print(f"profile: {result['profile_path']}")
-                print(f"preset: {result['preset']}")
-                print(f"added: {result['added'] or '(无新词)'}")
-                if result["skipped_seed"]:
-                    print(f"skipped(seed): {result['skipped_seed']}")
-                if result["skipped_dup"]:
-                    print(f"skipped(dup): {result['skipped_dup']}")
-                print(f"project_terms: {result['project_terms']}")
-                print(f"effective_pattern: {result['effective_pattern']}")
-            return 0
 
         print(f"错误: 未知 preset 子命令: {args.preset_command}", file=sys.stderr)
         return 1
-    except ProfileError as exc:
+    except (ProfileError, KnowledgeGovernanceError) as exc:
         print(f"错误: {exc}", file=sys.stderr)
-        return 1
+        return 2 if isinstance(exc, KnowledgeGovernanceError) else 1
 
 
 def dispatch_knowledge_command(args: argparse.Namespace) -> Optional[int]:

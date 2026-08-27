@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-import tracecite_mobile.analysis.scenario as scenario_module
+import tracecite.runtime.scenario as scenario_module
 from tracecite_mobile.analysis.scenario import ScenarioError, run_scenario, validate_scenario_spec
 from tracecite_mobile.cli import main
 from tracecite_core.run import RunIntegrityError, verify_manifest

@@ -16,6 +16,7 @@ from .commands.maintenance import (
     dispatch_maintenance_command,
     register_maintenance_commands,
 )
+from .commands.seal import dispatch_seal_command, register_seal_commands
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -36,6 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
     register_device_commands(sub)
+    register_seal_commands(sub)
     register_analysis_commands(sub)
     register_knowledge_commands(sub)
     register_maintenance_commands(sub)
@@ -49,6 +51,7 @@ def _should_ensure_default_knowledge(args: argparse.Namespace) -> bool:
     return args.command in {
         "filter",
         "behavior",
+        "seal",
         "grow",
         "preset",
         "profile",
@@ -80,9 +83,35 @@ def _ensure_default_knowledge_on_start(args: argparse.Namespace) -> None:
         print(f"已为项目初始化默认知识库: {path}", file=sys.stderr)
 
 
+def _check_knowledge_governance_on_start(args: argparse.Namespace) -> bool:
+    """Fail closed when managed knowledge changed outside promotion."""
+
+    if not _should_ensure_default_knowledge(args):
+        return True
+    if args.command == "grow" and getattr(args, "grow_command", None) == "doctor":
+        return True
+    from tracecite.knowledge import KnowledgeGovernanceError
+
+    from .analysis.knowledge_governance import require_mobile_knowledge_integrity
+
+    try:
+        require_mobile_knowledge_integrity(
+            Path.cwd(), platform=getattr(args, "platform", "ios")
+        )
+    except KnowledgeGovernanceError as exc:
+        print(f"错误: {exc}", file=sys.stderr)
+        return False
+    return True
+
+
 def main(argv: list[str] | None = None) -> int:
+    from tracecite.extension import ExtensionAPI
+
+    from .extension import register as register_extension
     from .plugin_sdk import load_analyzer_plugins
 
+    # The standalone Mobile CLI is an explicit host of the Mobile extension.
+    register_extension(ExtensionAPI())
     plugin_results = load_analyzer_plugins(strict=False)
 
     parser = build_parser()
@@ -94,8 +123,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"错误: 插件加载失败: {names}；请执行 tracecite-mobile plugin doctor", file=sys.stderr)
         return 1
     _ensure_default_knowledge_on_start(args)
+    if not _check_knowledge_governance_on_start(args):
+        return 2
 
     for dispatch in (
+        dispatch_seal_command,
         dispatch_device_command,
         dispatch_analysis_command,
         dispatch_knowledge_command,

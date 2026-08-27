@@ -15,6 +15,7 @@ from tracecite_core.text_filter import (
     DEFAULT_TEMPLATE_THRESHOLD,
     FilterError,
     _safe_tag,
+    combine_patterns,
     filter_text,
     filter_texts,
     text_time_range,
@@ -24,9 +25,13 @@ from tracecite_core.text_filter import (
 from ..analysis.behavior_summary import summarize_behavior_file
 from ..analysis.knowledge import KnowledgeError, resolve_scenario_pattern
 from ..analysis.scenario import cmd_scenario
-from ..device.session import SessionError, load_all_sessions
+from ..device.archive import ArchiveError, request_seal_hot
+from ..device.session import SessionError, load_analysis_sessions
 from ..shared.config import ProfileError, load_project_profile
 from ..shared.command_run import CommandRun
+from ..shared.log_paths import resolve_runs_dir, infer_device_name_from_hot
+from ..shared.output_layout import is_immutable_log_source
+from tracecite.integrations.agent_projection import compact_filter_payload, encoded_json
 
 
 def register_analysis_commands(sub: argparse._SubParsersAction) -> None:
@@ -54,13 +59,16 @@ def register_analysis_commands(sub: argparse._SubParsersAction) -> None:
         "--output-dir",
         help=f"配合 --from-sessions：日志目录，默认取 profile 或 {DEFAULT_LOG_OUTPUT_DIR}",
     )
-    pattern_group = filter_parser.add_mutually_exclusive_group(required=False)
-    pattern_group.add_argument("--grep", metavar="PATTERN", help="扩展正则（grep -E）")
-    pattern_group.add_argument(
+    filter_parser.add_argument(
+        "--grep",
+        metavar="PATTERN",
+        help="扩展正则（grep -E）；与 --preset 同时使用时按 OR 合并",
+    )
+    filter_parser.add_argument(
         "--preset",
         metavar="NAME",
         help=(
-            "预设关键词组合；未传 --grep/--preset 时使用 profile 的 "
+            "预设关键词组合；可与 --grep 按 OR 合并；两者均未传时使用 profile 的 "
             "default_filter_preset / default_filter_pattern"
         ),
     )
@@ -69,7 +77,12 @@ def register_analysis_commands(sub: argparse._SubParsersAction) -> None:
     filter_parser.add_argument(
         "--snapshot",
         action="store_true",
-        help="先冻结快照再过滤；指定 --out 时快照也写入输出目录",
+        help="先冻结快照再过滤（live hot 推荐改用 --seal-first）；指定 --out 时快照也写入输出目录",
+    )
+    filter_parser.add_argument(
+        "--seal-first",
+        action="store_true",
+        help="过滤前先 seal 当前 hot（O(1) rename 切段），替代对 live 日志的 copy2 snapshot",
     )
     filter_parser.add_argument(
         "--segmenter",
@@ -97,6 +110,23 @@ def register_analysis_commands(sub: argparse._SubParsersAction) -> None:
         help="合并知识库业务场景词（需要 preset 上下文）",
     )
     filter_parser.add_argument("--json", action="store_true", help="以 JSON 输出结果")
+    filter_parser.add_argument(
+        "--agent-view",
+        action="store_true",
+        help="JSON 输出时附带 agent_view（默认与 --json 同时启用）",
+    )
+    filter_parser.add_argument(
+        "--no-agent-view",
+        action="store_true",
+        help="JSON 输出时不附带 agent_view",
+    )
+    filter_parser.add_argument(
+        "--max-line-chars",
+        type=int,
+        default=1024,
+        metavar="N",
+        help="过滤正文单行最大字符数，完整行保留在 records_path（默认 1024）",
+    )
     filter_parser.add_argument(
         "--fold",
         action="store_true",
@@ -129,14 +159,26 @@ def register_analysis_commands(sub: argparse._SubParsersAction) -> None:
     scenario_sub = scenario_parser.add_subparsers(dest="scenario_command", required=True)
     scenario_run = scenario_sub.add_parser("run", help="执行 JSON/YAML 场景定义")
     scenario_run.add_argument("spec", help="场景定义文件路径")
+    scenario_run.add_argument(
+        "--base-dir",
+        help="场景 source 相对路径的解析根目录（默认使用场景文件所在目录）",
+    )
     scenario_run.add_argument("--json", action="store_true", help="以 JSON 输出结果")
     scenario_validate = scenario_sub.add_parser("validate", help="校验场景 schema 与扩展引用")
     scenario_validate.add_argument("spec", help="场景定义文件路径")
+    scenario_validate.add_argument(
+        "--base-dir",
+        help="场景 source 相对路径的解析根目录（默认使用场景文件所在目录）",
+    )
     scenario_validate.add_argument("--json", action="store_true", help="以 JSON 输出结果")
     scenario_explain = scenario_sub.add_parser(
         "explain", help="展示解析后的来源、格式、过滤、断言与交付计划"
     )
     scenario_explain.add_argument("spec", help="场景定义文件路径")
+    scenario_explain.add_argument(
+        "--base-dir",
+        help="场景 source 相对路径的解析根目录（默认使用场景文件所在目录）",
+    )
     scenario_explain.add_argument("--json", action="store_true", help="以 JSON 输出结果")
     scenario_verify = scenario_sub.add_parser(
         "verify", help="校验运行 manifest 中全部输入与产物的完整性"
@@ -145,8 +187,24 @@ def register_analysis_commands(sub: argparse._SubParsersAction) -> None:
     scenario_verify.add_argument("--json", action="store_true", help="以 JSON 输出结果")
 
 
+def _attach_agent_view(payload: Dict[str, Any], *, enabled: bool) -> Dict[str, Any]:
+    if not enabled:
+        return payload
+    payload = dict(payload)
+    payload["agent_view"] = compact_filter_payload(payload)
+    return payload
+
+
+def _resolve_agent_view(args: argparse.Namespace) -> bool:
+    if getattr(args, "no_agent_view", False):
+        return False
+    if getattr(args, "agent_view", False) or getattr(args, "json", False):
+        return True
+    return False
+
+
 def _print_json(payload: Any) -> None:
-    print(json.dumps(payload, ensure_ascii=False, indent=2))
+    print(encoded_json(payload))
 
 
 def _scenario_output_subdir(scenario: str) -> Optional[Path]:
@@ -243,24 +301,43 @@ def _register_filter_artifacts(command_run: CommandRun, payload: Dict[str, Any])
             command_run.add_artifact(row.get(key), role=role)
 
 
+def _seal_paths_before_filter(
+    paths: list[Path],
+    labels: list[str],
+) -> list[Path]:
+    sealed: list[Path] = []
+    for index, path in enumerate(paths):
+        if is_immutable_log_source(path):
+            sealed.append(path)
+            continue
+        label = labels[index] if index < len(labels) else ""
+        result = request_seal_hot(
+            path,
+            device_name=infer_device_name_from_hot(path, label),
+        )
+        sealed.append(Path(result.sealed_path))
+    return sealed
+
+
 def cmd_behavior(args: argparse.Namespace) -> int:
     path = Path(args.log_path).expanduser()
     platform = getattr(args, "platform", "ios")
+    profile = load_project_profile(Path.cwd(), platform=platform)
     command_run = CommandRun(
         name="behavior-summarize",
         kind="behavior",
         platform=platform,
-        run_root=Path.cwd() / ".tracecite" / "runs",
+        run_root=resolve_runs_dir(platform, profile),
         parameters={
             "dedupe": not args.no_dedupe,
             "scenario": getattr(args, "scenario", None),
         },
     )
     try:
-        frozen = command_run.freeze_input(path)
+        prepared = command_run.prepare_input(path)
         command_run.freeze_project_context(Path.cwd(), platform=platform)
         summary = summarize_behavior_file(
-            frozen,
+            prepared,
             dedupe=not args.no_dedupe,
             start_dir=Path.cwd(),
             scenario=getattr(args, "scenario", None),
@@ -286,7 +363,10 @@ def cmd_behavior(args: argparse.Namespace) -> int:
         )
         payload.update(run_fields)
         payload["report_path"] = str(report_path)
-        payload["input_lineage"] = {"original": str(path.resolve()), "snapshot": str(frozen)}
+        payload["input_lineage"] = {
+            "original": str(path.resolve()),
+            "work_input": str(prepared),
+        }
     except (KnowledgeError, OSError, RunIntegrityError) as exc:
         failed = command_run.fail(exc)
         print(f"错误: {exc}", file=sys.stderr)
@@ -319,6 +399,9 @@ def cmd_filter(args: argparse.Namespace) -> int:
             tag = args.tag or default_tag
             preset_name = args.preset
             pattern_source = f"preset:{args.preset}"
+            if args.grep:
+                pattern = combine_patterns(pattern, args.grep)
+                pattern_source += "+grep"
         elif args.grep:
             pattern, tag = args.grep, args.tag
             pattern_source = "grep"
@@ -344,7 +427,7 @@ def cmd_filter(args: argparse.Namespace) -> int:
                 base_pattern=pattern,
                 platform=platform,
             )
-            pattern_source = f"preset:{preset_name}+scenario:{scenario}"
+            pattern_source += f"+scenario:{scenario}"
 
         raw_paths = getattr(args, "log_path", None) or []
         if isinstance(raw_paths, (str, Path)):
@@ -353,7 +436,7 @@ def cmd_filter(args: argparse.Namespace) -> int:
         labels: list[str] = []
         if getattr(args, "from_sessions", False):
             log_dir = Path(args.output_dir).expanduser() if args.output_dir else profile.log_output_dir
-            sessions = load_all_sessions(log_dir)
+            sessions = load_analysis_sessions(log_dir, platform=platform)
             if not sessions:
                 raise FilterError("当前没有 session；无法使用 --from-sessions")
             for session in sessions.values():
@@ -378,6 +461,13 @@ def cmd_filter(args: argparse.Namespace) -> int:
                 "--out 只适用于单文件；多文件请分别执行或使用 scenario output.run_dir"
             )
 
+        if getattr(args, "seal_first", False):
+            unique_paths = _seal_paths_before_filter(unique_paths, unique_labels)
+
+        use_snapshot = bool(args.snapshot) and not getattr(args, "seal_first", False)
+        if use_snapshot and all(is_immutable_log_source(path) for path in unique_paths):
+            use_snapshot = False
+
         format_spec = _parse_format_arg(args.format)
         if len(unique_paths) > 1 and args.segmenter == "auto" and format_spec is None:
             segmenter = [
@@ -395,7 +485,7 @@ def cmd_filter(args: argparse.Namespace) -> int:
             name="filter",
             kind="filter",
             platform=platform,
-            run_root=Path.cwd() / ".tracecite" / "runs",
+            run_root=resolve_runs_dir(platform, profile),
             parameters={
                 "pattern": pattern,
                 "pattern_source": pattern_source,
@@ -404,7 +494,8 @@ def cmd_filter(args: argparse.Namespace) -> int:
                 "segmenters": [
                     item.name for item in segmenter
                 ] if isinstance(segmenter, list) else [segmenter.name],
-                "snapshot": bool(args.snapshot),
+                "snapshot": use_snapshot,
+                "seal_first": bool(getattr(args, "seal_first", False)),
                 "scope": {
                     "pid": args.pid,
                     "tail_lines": args.tail_lines,
@@ -417,13 +508,13 @@ def cmd_filter(args: argparse.Namespace) -> int:
             },
         )
         command_run.freeze_project_context(Path.cwd(), platform=platform)
-        frozen_paths = command_run.freeze_inputs(unique_paths)
+        prepared_paths = command_run.prepare_inputs(unique_paths)
         filter_dir = command_run.workspace.evidence_dir / ".filtered"
         filter_kwargs = dict(
             pattern=pattern,
             tag=tag,
             segmenter=segmenter,
-            snapshot=args.snapshot,
+            snapshot=use_snapshot,
             pid=args.pid,
             tail_lines=args.tail_lines,
             line_from=args.line_from,
@@ -431,6 +522,7 @@ def cmd_filter(args: argparse.Namespace) -> int:
             last=args.last,
             since=args.since,
             until=args.until,
+            max_line_chars=getattr(args, "max_line_chars", 1024),
             template_threshold=(
                 DEFAULT_TEMPLATE_THRESHOLD
                 if args.fold
@@ -444,7 +536,7 @@ def cmd_filter(args: argparse.Namespace) -> int:
             if isinstance(single_kwargs["segmenter"], list):
                 single_kwargs["segmenter"] = single_kwargs["segmenter"][0]
             result = filter_text(
-                frozen_paths[0],
+                prepared_paths[0],
                 output_path=_resolve_filter_output(
                     scenario=scenario,
                     tag=tag or "filtered",
@@ -467,10 +559,11 @@ def cmd_filter(args: argparse.Namespace) -> int:
                 )
             )
             payload["input_lineage"] = [
-                {"original": str(unique_paths[0].resolve()), "snapshot": str(frozen_paths[0])}
+                {"original": str(unique_paths[0].resolve()), "work_input": str(prepared_paths[0])}
             ]
+            agent_view = _resolve_agent_view(args)
             if args.json:
-                _print_json(payload)
+                _print_json(_attach_agent_view(payload, enabled=agent_view))
             else:
                 print(f"过滤完成: {result.match_records} 条 → {result.output_path}")
                 if result.match_records == 0:
@@ -479,7 +572,7 @@ def cmd_filter(args: argparse.Namespace) -> int:
             return 0 if result.match_records > 0 else 2
 
         multi = filter_texts(
-            frozen_paths,
+            prepared_paths,
             merge_timeline=bool(args.merge_timeline),
             source_labels=unique_labels or None,
             output_dir=filter_dir,
@@ -491,24 +584,25 @@ def cmd_filter(args: argparse.Namespace) -> int:
             command_run.complete(
                 verdict="passed" if multi.match_records > 0 else "failed",
                 metrics={
-                    "source_count": len(frozen_paths),
+                    "source_count": len(prepared_paths),
                     "match_records": multi.match_records,
                 },
             )
         )
         payload["input_lineage"] = [
-            {"original": str(original.resolve()), "snapshot": str(frozen)}
-            for original, frozen in zip(unique_paths, frozen_paths)
+            {"original": str(original.resolve()), "work_input": str(prepared)}
+            for original, prepared in zip(unique_paths, prepared_paths)
         ]
+        agent_view = _resolve_agent_view(args)
         if args.json:
-            _print_json(payload)
+            _print_json(_attach_agent_view(payload, enabled=agent_view))
         else:
             print(f"多文件过滤完成: {multi.match_records} 条")
             if multi.merged_timeline_path:
                 print(f"timeline: {multi.merged_timeline_path}")
             print(f"manifest: {payload['manifest_path']}")
         return 0 if multi.match_records > 0 else 2
-    except (FilterError, ProfileError, KnowledgeError, SessionError, RunIntegrityError, OSError) as exc:
+    except (FilterError, ProfileError, KnowledgeError, SessionError, RunIntegrityError, ArchiveError, OSError) as exc:
         failed = command_run.fail(exc) if command_run is not None else None
         print(f"错误: {exc}", file=sys.stderr)
         if failed is not None:

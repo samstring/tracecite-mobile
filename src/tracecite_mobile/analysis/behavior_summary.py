@@ -18,6 +18,9 @@ from tracecite_core.events import AnalysisEvent
 
 _TS_RE = re.compile(r"^(\w{3}\s+\d+\s+\d{2}:\d{2}:\d{2})")
 _APPLOG_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2})(?:[.,]\d{1,6})?")
+_ANDROID_THREADTIME_TS_RE = re.compile(
+    r"^(\d{2}-\d{2}\s+\d{2}:\d{2}:\d{2}(?:\.\d+)?)"
+)
 
 
 def _parse_timestamp(text: str) -> Optional[str]:
@@ -26,6 +29,9 @@ def _parse_timestamp(text: str) -> Optional[str]:
     if m:
         return m.group(1)
     m = _APPLOG_TS_RE.match(text)
+    if m:
+        return m.group(1)
+    m = _ANDROID_THREADTIME_TS_RE.match(text)
     if m:
         return m.group(1)
     return None
@@ -53,7 +59,10 @@ def register_behavior_parser(
     key = str(name).strip()
     if not key:
         raise ValueError("behavior parser name cannot be empty")
-    if key in _BEHAVIOR_PARSERS and not replace:
+    existing = _BEHAVIOR_PARSERS.get(key)
+    if existing is parser:
+        return
+    if existing is not None and not replace:
         raise ValueError(f"behavior parser already registered: {key}")
     _BEHAVIOR_PARSERS[key] = parser
 

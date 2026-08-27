@@ -1,8 +1,7 @@
 # -*- coding: utf-8 -*-
 """平台后端注册与获取。
 
-CLI 通过 ``get_backend(platform)`` 取得对应后端；默认 ios 走现有实现（行为不变）。
-android 后端在第一阶段实现，不依赖真实设备即可通过 fake runner 测试。
+CLI 通过 ``get_backend(platform)`` 取得对应后端；内置与第三方平台使用同一注册契约。
 """
 
 from __future__ import annotations
@@ -51,11 +50,7 @@ def is_supported_platform(platform: str) -> bool:
 
 
 def get_backend(platform: str = "ios", run=None) -> BaseBackend:
-    """返回平台后端实例。
-
-    - ios: wraps devices, stream, session, and capture modules
-    - android: 全新 adb / logcat / Perfetto 后端
-    """
+    """返回平台后端实例；具体采集实现对公共调用方不可见。"""
     _ensure_builtin_backends()
     key = str(platform or "ios").strip().lower()
     factory = _BACKENDS.get(key)

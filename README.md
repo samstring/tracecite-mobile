@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>Let agents analyze phone logs directly — built on TraceCite Core.</strong>
+  <strong>The official Mobile domain adapter for the TraceCite agent context gateway.</strong>
 </p>
 
 <p align="center">
@@ -30,12 +30,9 @@ Four things that make mobile debugging harder than it should be:
 ## Install
 
 ```bash
-# Install tracecite-core first: https://github.com/xxx/tracecite-core
-git clone https://github.com/xxx/tracecite-core
-pip install -e ./tracecite-core
-
-# Then install Mobile
-pip install -e .
+# Install the main TraceCite distribution, then the Mobile extension
+pip install tracecite
+pip install tracecite-mobile
 tracecite-mobile profile init
 ```
 
@@ -50,11 +47,27 @@ tracecite-mobile session start --date
 # ... reproduce the issue on device ...
 
 # 2. Analyze the 2-minute window around the failure
-tracecite-mobile filter --from-sessions --snapshot --last 2m --preset system-fault --json
+tracecite-mobile seal --from-sessions --json
+tracecite-mobile filter --from-sessions --last 2m --preset system-fault --json
 
 # 3. Lift raw log lines into user behavior events
 tracecite-mobile behavior summarize --from-sessions --json
 ```
+
+Live logs keep a 30-minute hot window. Active collectors perform one archive
+check every 30 minutes and move expired records into the hidden internal
+`.archive/` store. Use `archive list` and `archive pull`; direct folder
+management is neither required nor recommended.
+
+Maintenance is explicit: `clean analysis --before today` removes only old
+logs, performance outputs, and unpinned completed analysis runs. Runtime state,
+locks, active/recovery outputs, and malformed manifests are kept fail-closed.
+The default pass inspects `~/Documents/TraceCite/mobile/*/runs/` and per-run directories under log/instrument `.runs` containers when outputs are redirected.
+and redirected `.runs` containers under log/capture outputs, one run directory
+at a time.
+Archive evidence is excluded by default. Preview it with
+`clean analysis --include-archive --dry-run`; an actual archive deletion
+requires both `--include-archive --yes`.
 
 After one full investigation, the agent has:
 
@@ -72,6 +85,9 @@ tracecite-mobile capture stop    # → auto trace file + hang summary
 tracecite-mobile filter app.log --preset system-lifecycle --json
 tracecite-mobile filter app.log --preset network-http --json
 tracecite-mobile filter app.log --preset memory-leak --json
+
+# Add incident-specific terms without discarding the reusable preset (OR semantics)
+tracecite-mobile filter app.log --preset network-http --grep 'checkout|payment' --json
 ```
 
 ## vs. Dumping Raw Logs to AI
@@ -82,16 +98,41 @@ tracecite-mobile filter app.log --preset memory-leak --json
 | Data types | Text logs only | Logs + performance traces; one command records both |
 | Output format | Raw text; AI parses on its own | Structured JSON + user behavior events |
 | User actions | AI infers from log strings | Auto-lifted into structured behavior events |
-| Knowledge reuse | None | Local knowledge base improves with each use |
+| Knowledge reuse | None | Auditable project-local presets and candidate terms |
 | Reproducibility | Different steps across runs | Full run manifest records all parameters, input frozen |
 
 ## Architecture
 
-Core provides the text analysis engine. Mobile adds four layers on top:
+The main TraceCite distribution provides Core evidence primitives, the generic
+Runtime, and the versioned Extension API. Mobile stays independent and
+registers its device adapters and domain semantics through
+`tracecite.extensions`:
+
+```text
+External Agent
+      |
+TraceCite Runtime ---- tracecite-mobile
+      |
+TraceCite Core
+```
+
+Importing either `tracecite` or `tracecite_mobile` does not register Mobile
+formats or mutate the Core registry. Use
+`tracecite extension load` or `tracecite run ... --load-extensions --runtime mobile`
+when the main Runtime should discover the installed Mobile extension.
+The standalone `tracecite-mobile` CLI explicitly hosts the same extension
+before dispatching a command.
 
 <img src="architecture.svg" alt="Mobile architecture: Device, Analysis, Knowledge, Plugin layers on Core" width="100%"/>
 
-`--platform ios|android` switches backends. All commands work across platforms.
+`--platform ios|android` switches backends through the same capability contract.
+Use `performance profiles` to discover supported profiles; optional operations
+fail explicitly when a backend does not declare them.
+
+```bash
+tracecite-mobile --platform ios performance profiles --json
+tracecite-mobile --platform android performance start --profile frame --json
+```
 
 ## Customization
 
@@ -99,7 +140,9 @@ Core provides the text analysis engine. Mobile adds four layers on top:
 
 ```bash
 tracecite-mobile filter app.log --preset system-lifecycle --json
-tracecite-mobile preset add --name my-preset --terms "payment failed, network timeout, order error"
+tracecite-mobile filter app.log --preset network-http --grep 'checkout|payment' --json
+tracecite-mobile grow propose term my-preset "payment failed" "network timeout" \
+  --created-by agent-a --case-id run-001 --evidence evidence://run/001#manifest
 ```
 
 **Scenario files.** Save investigation steps as JSON — team-sharable, version-controllable:
@@ -126,18 +169,28 @@ tracecite-mobile preset add --name my-preset --terms "payment failed, network ti
 tracecite-mobile scenario run crash-investigation.json
 ```
 
-**Knowledge accumulation.** Patterns and features discovered during investigations are saved locally:
+**Knowledge governance.** Agent findings first enter a physically separate
+candidate store. A second independent case verifies them; a different reviewer
+then authorizes promotion:
 
 ```bash
-tracecite-mobile grow auto app.log --preset my-app   # auto-discover from logs
-tracecite-mobile grow audit --preset my-app           # prune unused terms
+tracecite-mobile grow suggest app.log --preset my-app
+tracecite-mobile grow propose learning "Bounded evidence is required" \
+  --created-by agent-a --case-id run-001 --evidence evidence://run/001#manifest
+tracecite-mobile grow verify kc-ID --case-id run-002 --outcome support \
+  --verified-by agent-b --evidence evidence://run/002#manifest
+tracecite-mobile grow promote kc-ID --approved-by human-reviewer
+tracecite-mobile grow doctor
 ```
 
-All knowledge stays in the `.tracecite/` local directory. Nothing is uploaded.
+Legacy direct writes (`preset add`, `grow term/marker/learning/playbook/auto`)
+are rejected by the Agent CLI. Candidate and trusted knowledge stay in separate
+files under `.tracecite/`; nothing is uploaded. A changed trusted file fails its
+integrity gate until restored through the governed workflow.
 
 ## See Also
 
-- [**tracecite-core**](../tracecite-core/) — the underlying text analysis engine.
+- [**TraceCite**](../tracecite-core/) — main distribution: Core, Runtime, and Extension API.
 
 ## License
 

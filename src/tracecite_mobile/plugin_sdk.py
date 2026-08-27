@@ -19,10 +19,40 @@ from .analysis.reporting import (
 )
 from .analysis.behavior_summary import register_behavior_parser
 from .platforms.registry import register_backend
-from .platforms.base import BackendError, BaseBackend, PlatformBackend, RunResult
-from .platforms.models import CaptureResult, DeviceRef, LogSessionResult
+from .platforms.base import (
+    AppCapability,
+    ArchiveCapability,
+    BackendError,
+    BaseBackend,
+    CrashCapability,
+    DeviceCapability,
+    DiagnosticCapability,
+    LogCapability,
+    PerformanceCapability,
+    PlatformBackend,
+    RunResult,
+    UnsupportedCapabilityError,
+)
+from .platforms.models import (
+    ArchiveSegment,
+    Capabilities,
+    CaptureResult,
+    CrashEvent,
+    CrashResult,
+    DeviceRef,
+    DiagnosticResult,
+    LogSessionResult,
+    LogWindowResult,
+    PerformanceProfile,
+    PerformanceResult,
+    PerformanceSession,
+    PerformanceStatus,
+    ProcessRef,
+    SessionRef,
+    SessionStatus,
+)
 
-ANALYZER_PLUGIN_API_VERSION = "2"
+ANALYZER_PLUGIN_API_VERSION = "3"
 
 
 @dataclass(frozen=True)
@@ -63,16 +93,37 @@ def load_analyzer_plugins(*, strict: bool = True) -> List[Dict[str, Optional[str
 __all__ = [
     "AnalyzerPluginAPI",
     "ANALYZER_PLUGIN_API_VERSION",
+    "AppCapability",
+    "ArchiveCapability",
+    "ArchiveSegment",
     "AssertionContext",
     "AssertionOutcome",
     "ReportArtifact",
     "ReportContext",
     "BackendError",
     "BaseBackend",
-    "PlatformBackend",
-    "RunResult",
+    "Capabilities",
+    "CrashCapability",
+    "CrashEvent",
+    "CrashResult",
+    "DeviceCapability",
     "DeviceRef",
+    "DiagnosticCapability",
+    "DiagnosticResult",
+    "LogCapability",
     "LogSessionResult",
+    "LogWindowResult",
+    "PerformanceCapability",
+    "PerformanceProfile",
+    "PerformanceResult",
+    "PerformanceSession",
+    "PerformanceStatus",
+    "PlatformBackend",
+    "ProcessRef",
+    "RunResult",
+    "SessionRef",
+    "SessionStatus",
+    "UnsupportedCapabilityError",
     "CaptureResult",
     "load_analyzer_plugins",
     "loaded_plugins",

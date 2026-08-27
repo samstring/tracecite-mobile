@@ -94,6 +94,7 @@ def test_android_summary_uses_android_project_knowledge(tmp_path) -> None:
     summary = summarize_behavior_file(path, start_dir=tmp_path, platform="android")
     assert summary.event_count == 1
     assert summary.events[0].label == "Request failed"
+    assert summary.events[0].timestamp == "08-09 10:00:00.000"
 
 
 def test_user_behavior_core_preset_has_no_code_keywords() -> None:

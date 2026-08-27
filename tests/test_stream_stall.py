@@ -77,6 +77,7 @@ class SessionStallStatusTest(unittest.TestCase):
     def _sess(self, root: Path, *, started_at: str) -> session.StreamSession:
         out = root / "ios_live_Phone.log"
         out.write_text("", encoding="utf-8")
+        (root / "session.log").write_text("collector\n", encoding="utf-8")
         return session.StreamSession(
             pid=4242,
             device_name="Phone",
@@ -156,6 +157,80 @@ class SessionStallStatusTest(unittest.TestCase):
             self.assertEqual(started.pid, 9999)
             loaded = session.load_all_sessions(root)
             self.assertEqual(loaded["udid-1"].pid, 9999)
+
+    def test_stop_waits_for_non_child_collector_and_ignores_waitpid(self) -> None:
+        """The session CLI is not the collector's parent process."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            out = root / "ios_live_Phone.log"
+            collector = root / "session.log"
+            out.write_text("device\n", encoding="utf-8")
+            collector.write_text("collector\n", encoding="utf-8")
+            saved = session.StreamSession(
+                pid=4242,
+                device_name="Phone",
+                device_udid="udid-1",
+                device_model="iPhone",
+                process_name="DemoApp",
+                subsystem="all",
+                output_path=str(out),
+                log_output_dir=str(root),
+                capture_output_dir=str(root),
+                stream_log_path=str(collector),
+                started_at="2026-07-30T00:00:00",
+                profile_path=None,
+            )
+            sessions = {saved.device_udid: saved}
+            with mock.patch.object(
+                session,
+                "_pid_alive",
+                side_effect=[True, True, False],
+            ):
+                with mock.patch.object(
+                    session,
+                    "_session_process_alive",
+                    side_effect=[True, True],
+                ):
+                    with mock.patch.object(session.os, "killpg") as killpg:
+                        with mock.patch.object(
+                            session.os,
+                            "waitpid",
+                            side_effect=ChildProcessError,
+                        ) as waitpid:
+                            with mock.patch.object(session.time, "sleep"):
+                                stopped = session._stop_one_unlocked(sessions, saved)
+
+            self.assertIs(stopped, saved)
+            self.assertNotIn(saved.device_udid, sessions)
+            killpg.assert_called_once_with(saved.pid, session.signal.SIGINT)
+            waitpid.assert_not_called()
+
+    def test_file_stability_wait_covers_delayed_flush_without_reading_content(self) -> None:
+        """A delayed size/mtime change must reset the stability window."""
+
+        signatures = iter(
+            [
+                (10, 100),
+                (18, 180),  # delayed collector flush
+                (18, 180),
+            ]
+        )
+        with mock.patch.object(
+            session,
+            "_file_signature",
+            side_effect=lambda _path: next(signatures),
+        ):
+            with mock.patch.object(session.time, "sleep") as sleep:
+                self.assertTrue(
+                    session._wait_for_file_stable(
+                        Path("/not-read"),
+                        timeout_sec=1,
+                        poll_sec=0,
+                        stable_checks=2,
+                    )
+                )
+        self.assertEqual(sleep.call_count, 2)
 
 
 if __name__ == "__main__":

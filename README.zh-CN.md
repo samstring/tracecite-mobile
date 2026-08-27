@@ -49,12 +49,23 @@ tracecite-mobile session start --date
 
 # ... 在设备上复现问题 ...
 
-# 2. 分析事发前后 2 分钟的日志
-tracecite-mobile filter --from-sessions --snapshot --last 2m --preset system-fault --json
+# 2. 分析事发前后 2 分钟的日志（先 seal 切段，再 filter）
+tracecite-mobile seal --from-sessions --json
+tracecite-mobile filter --from-sessions --last 2m --preset system-fault --json
 
 # 3. 把日志行提升为用户行为事件
 tracecite-mobile behavior summarize --from-sessions --json
 ```
+
+实时日志默认保留最近 30 分钟作为 hot 窗口；采集器每 30 分钟执行一次归档检查，
+把已过期的数据移入隐藏的内部 `.archive/`。日常只需使用 `archive list` 和
+ `archive pull`，不需要、也不建议直接管理该目录。
+
+维护清理是显式操作：`clean analysis --before today` 只清理过期日志、性能产物
+和未 pinned 的已完成分析运行；运行状态、锁、仍在采集/恢复中的产物以及损坏的
+manifest 会 fail-closed 保留。分析 run 默认清理 `~/Documents/TraceCite/mobile/*/runs/`（及 profile 指定的 `analysis_output_dir`）；日志/性能目录下的 `.runs` 容器也会逐个 run 判断。归档证据默认不碰；先用
+`clean analysis --include-archive --dry-run` 预览，实际删除必须同时指定
+`--include-archive --yes`。
 
 一次完整的排查跑下来，Agent 拿到：
 
@@ -72,6 +83,9 @@ tracecite-mobile capture stop    # → 自动输出 trace 文件 + 卡顿摘要
 tracecite-mobile filter app.log --preset system-lifecycle --json
 tracecite-mobile filter app.log --preset network-http --json
 tracecite-mobile filter app.log --preset memory-leak --json
+
+# 保留通用 preset，同时补充本次事故关键词（按 OR 合并）
+tracecite-mobile filter app.log --preset network-http --grep 'checkout|payment' --json
 ```
 
 ## 相比直接丢日志给 AI
@@ -91,7 +105,14 @@ Core 提供了文本分析的引擎。Mobile 在此基础上加了四层：
 
 <img src="architecture.svg" alt="Mobile 架构：设备层、分析层、知识层、插件层，底层为 Core" width="100%"/>
 
-`--platform ios|android` 切换平台，所有命令跨平台通用。
+`--platform ios|android` 通过同一能力契约切换平台。可用
+`performance profiles` 查询当前平台的性能 profile；未声明的可选能力会明确失败，
+不会静默降级。
+
+```bash
+tracecite-mobile --platform ios performance profiles --json
+tracecite-mobile --platform android performance start --profile frame --json
+```
 
 ## 自定义流程
 
@@ -99,6 +120,7 @@ Core 提供了文本分析的引擎。Mobile 在此基础上加了四层：
 
 ```bash
 tracecite-mobile filter app.log --preset system-lifecycle --json
+tracecite-mobile filter app.log --preset network-http --grep 'checkout|payment' --json
 tracecite-mobile preset add --name my-preset --terms "支付失败, 网络超时, 订单异常"
 ```
 

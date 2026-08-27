@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -29,7 +30,22 @@ def _hot_log_text() -> str:
     return "".join(lines)
 
 
+class _FakeClock:
+    """Small monotonic clock substitute for interval scheduling tests."""
+
+    def __init__(self) -> None:
+        self.value = 0.0
+
+    def __call__(self) -> float:
+        return self.value
+
+    def advance(self, seconds: float) -> None:
+        self.value += seconds
+
+
 def _session(root: Path, *, udid: str, name: str, pid: int) -> session.StreamSession:
+    (root / f"ios_live_{name}.log").write_text("", encoding="utf-8")
+    (root / f"ios_live_{name}_session.log").write_text("collector\n", encoding="utf-8")
     return session.StreamSession(
         pid=pid,
         device_name=name,
@@ -166,6 +182,79 @@ class ArchiveRotatePullTest(unittest.TestCase):
             listed = archive.list_archive_segments(root, device_name="PhoneA")
             self.assertIn("PhoneA", listed["devices"])
             self.assertEqual(listed["devices"]["PhoneA"]["segment_count"], 1)
+            self.assertIn("/.archive/", listed["devices"]["PhoneA"]["archive_dir"])
+
+    def test_legacy_visible_archive_is_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy_dir = root / "archive" / "PhoneA"
+            legacy_dir.mkdir(parents=True)
+            segment_path = legacy_dir / "20260731_100000-20260731_100030.log"
+            segment_text = _line("Jul 31 10:00:00", "LEGACY")
+            segment_path.write_text(segment_text, encoding="utf-8")
+            archive.save_manifest(
+                legacy_dir,
+                [
+                    archive.ArchiveSegment(
+                        start="2026-07-31T10:00:00",
+                        end="2026-07-31T10:00:30",
+                        path=str(segment_path),
+                        bytes=len(segment_text.encode("utf-8")),
+                        lines=1,
+                    )
+                ],
+            )
+
+            listed = archive.list_archive_segments(root, device_name="PhoneA")
+            self.assertEqual(listed["devices"]["PhoneA"]["segment_count"], 1)
+            self.assertEqual(
+                listed["devices"]["PhoneA"]["archive_dir"], str(legacy_dir.resolve())
+            )
+            pulled = archive.pull_archive_window(
+                root,
+                device_name="PhoneA",
+                since="10:00:00",
+                until="10:01:00",
+            )
+            self.assertIn("LEGACY", pulled.output_path.read_text(encoding="utf-8"))
+            self.assertIn("/.archive/pulled/", str(pulled.output_path))
+
+    def test_canonical_and_legacy_duplicate_segment_is_not_repeated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            legacy_dir = root / "archive" / "PhoneA"
+            legacy_dir.mkdir(parents=True)
+            legacy_path = legacy_dir / "segment.log"
+            segment_text = _line("Jul 31 10:00:00", "DUPLICATE")
+            legacy_path.write_text(segment_text, encoding="utf-8")
+            segment = archive.ArchiveSegment(
+                start="2026-07-31T10:00:00",
+                end="2026-07-31T10:00:30",
+                path=str(legacy_path),
+                bytes=len(segment_text.encode("utf-8")),
+                lines=1,
+            )
+            archive.save_manifest(legacy_dir, [segment])
+
+            canonical_dir = archive.archive_device_dir(root, "PhoneA")
+            canonical_dir.mkdir(parents=True)
+            canonical_path = canonical_dir / "segment.log"
+            canonical_path.write_text(segment_text, encoding="utf-8")
+            archive.save_manifest(
+                canonical_dir,
+                [
+                    archive.ArchiveSegment(
+                        **{**segment.__dict__, "path": str(canonical_path)}
+                    )
+                ],
+            )
+
+            listed = archive.list_archive_segments(root, device_name="PhoneA")
+            self.assertEqual(listed["devices"]["PhoneA"]["segment_count"], 1)
+            self.assertEqual(
+                listed["devices"]["PhoneA"]["segments"][0]["path"],
+                str(canonical_path),
+            )
 
 
 class MultiFilterTest(unittest.TestCase):
@@ -210,24 +299,160 @@ class MultiFilterTest(unittest.TestCase):
 
 
 class HotWriterRotateTest(unittest.TestCase):
+    def test_scheduler_checks_after_interval_without_new_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hot = root / "ios_live_PhoneA.log"
+            hot.write_text(_hot_log_text(), encoding="utf-8")
+            clock = _FakeClock()
+            rotated = threading.Event()
+            waits = 0
+
+            def fake_wait(interval: float) -> bool:
+                nonlocal waits
+                waits += 1
+                if waits == 1:
+                    clock.advance(interval)
+                    return False
+                return True
+
+            with hot.open("a+", encoding="utf-8") as fp:
+                writer = archive.HotRotatingWriter(
+                    fp,
+                    hot_path=hot,
+                    device_name="PhoneA",
+                    archive_interval_sec=30 * 60,
+                    clock=clock,
+                    scheduler_wait=fake_wait,
+                )
+                with mock.patch.object(
+                    archive, "rotate_hot_log", side_effect=lambda *a, **k: rotated.set()
+                ) as rotate:
+                    writer.start_scheduler()
+                    self.assertTrue(rotated.wait(timeout=1))
+                    writer.close()
+                    self.assertEqual(rotate.call_count, 1)
+
     def test_writer_triggers_rotate(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             hot = root / "ios_live_PhoneA.log"
+            clock = _FakeClock()
             with hot.open("w", encoding="utf-8") as fp:
                 writer = archive.HotRotatingWriter(
                     fp,
                     hot_path=hot,
                     device_name="PhoneA",
                     hot_window_sec=30 * 60,
-                    check_bytes=10,  # 强制很快触发
+                    archive_interval_sec=30 * 60,
+                    check_bytes=10,  # 兼容参数不再触发短间隔检查
+                    clock=clock,
                 )
                 writer.write(_hot_log_text())
+                # The old byte threshold would rotate here. The first check
+                # is now time based and must wait for the 30-minute interval.
+                self.assertEqual(archive.list_archive_segments(root)["devices"], {})
+                clock.advance(30 * 60)
+                writer.write(_line("Jul 31 10:40:00", "NEW"))
             text = hot.read_text(encoding="utf-8")
             self.assertIn("HOT_B", text)
             self.assertNotIn("OLD_A", text)
             listed = archive.list_archive_segments(root)
             self.assertEqual(listed["devices"]["PhoneA"]["segment_count"], 1)
+
+    def test_interval_resets_after_successful_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hot = root / "ios_live_PhoneA.log"
+            clock = _FakeClock()
+            with hot.open("w", encoding="utf-8") as fp:
+                writer = archive.HotRotatingWriter(
+                    fp,
+                    hot_path=hot,
+                    device_name="PhoneA",
+                    archive_interval_sec=30 * 60,
+                    clock=clock,
+                )
+                with mock.patch.object(
+                    archive, "rotate_hot_log", wraps=archive.rotate_hot_log
+                ) as rotate:
+                    writer.write(_line("Jul 31 10:00:00", "A"))
+                    clock.advance(30 * 60 - 1)
+                    writer.write(_line("Jul 31 10:40:00", "B"))
+                    self.assertEqual(rotate.call_count, 0)
+                    clock.advance(1)
+                    writer.write(_line("Jul 31 10:41:00", "C"))
+                    self.assertEqual(rotate.call_count, 1)
+                    # A check at the same clock value does not repeat.
+                    writer.write(_line("Jul 31 10:42:00", "D"))
+                    self.assertEqual(rotate.call_count, 1)
+                    clock.advance(30 * 60 - 1)
+                    writer.write(_line("Jul 31 11:10:00", "E"))
+                    self.assertEqual(rotate.call_count, 1)
+                    clock.advance(1)
+                    writer.write(_line("Jul 31 11:11:00", "F"))
+                    self.assertEqual(rotate.call_count, 2)
+
+    def test_failed_check_retries_on_next_interval_not_next_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hot = root / "ios_live_PhoneA.log"
+            clock = _FakeClock()
+            attempts = []
+
+            def fail_once(*args: object, **kwargs: object) -> archive.RotateResult:
+                attempts.append(clock.value)
+                if len(attempts) == 1:
+                    raise RuntimeError("temporary archive failure")
+                return archive.RotateResult(
+                    rotated=False,
+                    cutoff=None,
+                    last_ts=None,
+                    archived=[],
+                    hot_path=str(hot),
+                    hot_lines=1,
+                    hot_bytes=1,
+                )
+
+            with hot.open("w", encoding="utf-8") as fp:
+                writer = archive.HotRotatingWriter(
+                    fp,
+                    hot_path=hot,
+                    device_name="PhoneA",
+                    archive_interval_sec=30 * 60,
+                    clock=clock,
+                )
+                with mock.patch.object(archive, "rotate_hot_log", side_effect=fail_once):
+                    writer.write(_line("Jul 31 10:00:00", "A"))
+                    clock.advance(30 * 60)
+                    writer.write(_line("Jul 31 10:40:00", "B"))
+                    writer.write(_line("Jul 31 10:40:01", "C"))
+                    self.assertEqual(attempts, [30 * 60])
+                    clock.advance(30 * 60 - 1)
+                    writer.write(_line("Jul 31 11:10:00", "D"))
+                    self.assertEqual(attempts, [30 * 60])
+                    clock.advance(1)
+                    writer.write(_line("Jul 31 11:10:01", "E"))
+                    self.assertEqual(attempts, [30 * 60, 60 * 60])
+
+    def test_flush_and_empty_write_do_not_force_archive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hot = root / "ios_live_PhoneA.log"
+            clock = _FakeClock()
+            with hot.open("w", encoding="utf-8") as fp:
+                writer = archive.HotRotatingWriter(
+                    fp,
+                    hot_path=hot,
+                    device_name="PhoneA",
+                    archive_interval_sec=30 * 60,
+                    clock=clock,
+                )
+                with mock.patch.object(archive, "rotate_hot_log") as rotate:
+                    clock.advance(30 * 60)
+                    writer.flush()
+                    writer.write("")
+                    self.assertEqual(rotate.call_count, 0)
 
 
 if __name__ == "__main__":

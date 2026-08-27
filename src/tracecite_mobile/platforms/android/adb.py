@@ -75,8 +75,15 @@ class AndroidAdbClient:
 
     def __init__(self, run=None, adb_path: Optional[str] = None) -> None:
         self._run = run or default_run
-        # adb_path=None 表示允许跳过 which 检查（测试注入 runner 时）
-        self.adb_path = adb_path if adb_path is not None else shutil.which("adb")
+        # Injected runners are fake-adb contracts and must not depend on a
+        # host SDK installation.  Real callers still resolve the executable
+        # through PATH when no explicit path is supplied.
+        if adb_path is not None:
+            self.adb_path = adb_path
+        elif run is not None:
+            self.adb_path = "adb"
+        else:
+            self.adb_path = shutil.which("adb")
 
     # ---- 基础 ----
     def require_adb(self) -> str:

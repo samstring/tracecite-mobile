@@ -16,7 +16,7 @@ description: >-
 默认将压缩包放到：
 
 ```bash
-~/Desktop/TraceCite/analysis/
+~/Documents/TraceCite/mobile/iOS/exports/
 ```
 
 压缩包命名建议：
@@ -63,19 +63,19 @@ export_{YYYYMMDDTHHMM}.zip
 python3 skills/ios-analysis-package/scripts/package_analysis.py \
   --tag capture_161922_perf \
   --report /path/to/analysis.md \
-  --log "$HOME/Desktop/TraceCite/Log/.filtered/filtered_demo.log" \
-  --raw-log "$HOME/Desktop/TraceCite/Log/ios_live_DemoPhone.log" \
-  --trace "$HOME/Desktop/TraceCite/Instrument/capture_demo.trace" \
-  --extra "$HOME/Desktop/TraceCite/Instrument/capture_demo_toc.xml" \
-  --extra "$HOME/Desktop/TraceCite/Instrument/capture_demo_hangs.xml" \
-  --extra "$HOME/Desktop/TraceCite/Instrument/capture_demo_hang_risks.xml" \
+  --log "$HOME/Documents/TraceCite/mobile/iOS/runs/<run-id>/evidence/.filtered/filtered_demo.log" \
+  --raw-log "$HOME/Documents/TraceCite/mobile/iOS/log/ios_live_DemoPhone.log" \
+  --trace "$HOME/Documents/TraceCite/mobile/iOS/instrument/capture_demo.trace" \
+  --extra "$HOME/Documents/TraceCite/mobile/iOS/instrument/capture_demo_toc.xml" \
+  --extra "$HOME/Documents/TraceCite/mobile/iOS/instrument/capture_demo_hangs.xml" \
+  --extra "$HOME/Documents/TraceCite/mobile/iOS/instrument/capture_demo_hang_risks.xml" \
   --json
 ```
 
 脚本会：
 
-- 创建 `~/Desktop/TraceCite/analysis/export_<time>/`
-- 默认自动包含 trace：优先使用 `--trace`，其次通过 `_toc.xml` / `_hangs.xml` 同名前缀反推 `.trace`，最后取 `~/Desktop/TraceCite/Instrument/` 下最新 `.trace`
+- 创建 `~/Documents/TraceCite/mobile/iOS/exports/export_<time>/`
+- 默认自动包含 trace：优先使用 `--trace`，其次通过 `_toc.xml` / `_hangs.xml` 同名前缀反推 `.trace`，最后取 `~/Documents/TraceCite/mobile/iOS/instrument/` 下最新 `.trace`
 - 默认自动包含原始日志：优先使用 `--raw-log`，其次从过滤日志头部 `# original_source:` 反推原始日志，并放入包内 `raw_logs/`
 - 复制 Markdown、过滤日志、原始日志、trace 与 extra 文件
 - 写入 `manifest.json`
@@ -95,7 +95,7 @@ python3 skills/ios-analysis-package/scripts/package_analysis.py \
 
 ```text
 已打包完成：
-$HOME/Desktop/TraceCite/analysis/export_20260626T1630.zip
+$HOME/Documents/TraceCite/mobile/iOS/exports/export_20260626T1630.zip
 
 包内包含 analysis.md、过滤日志、原始日志、trace、toc、hangs 和 manifest.json，可以直接保存或发给研发同学。
 ```

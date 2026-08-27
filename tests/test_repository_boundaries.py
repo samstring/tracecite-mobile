@@ -22,9 +22,11 @@ PUBLIC_SURFACE = (
 PUBLIC_FILES = (ROOT / "README.md", ROOT / "AGENTS.md", ROOT / "pyproject.toml")
 
 
-def test_mobile_depends_only_on_core_at_runtime() -> None:
+def test_mobile_depends_only_on_public_tracecite_layers_at_runtime() -> None:
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    assert 'dependencies = ["tracecite-core>=0.1.0,<0.2.0"]' in pyproject
+    assert '"tracecite>=0.1.0,<0.2.0"' in pyproject
+    assert "tracecite-core" not in pyproject
+    assert "tracecite-agent" not in pyproject
     private_distribution = "tracecite-" + "liz" + "hi"
     private_import = "tracecite_" + "liz" + "hi"
     assert private_distribution not in pyproject
@@ -35,6 +37,38 @@ def test_mobile_depends_only_on_core_at_runtime() -> None:
                 assert all(not item.name.startswith(private_import) for item in node.names)
             elif isinstance(node, ast.ImportFrom):
                 assert not (node.module or "").startswith(private_import)
+
+
+def test_mobile_scenario_compatibility_imports_use_runtime_implementation() -> None:
+    from tracecite.runtime.assertions import build_assertions as runtime_build_assertions
+    from tracecite.runtime.scenario import validate_scenario_spec as runtime_validate
+    from tracecite_mobile.analysis.assertions import build_assertions as mobile_build_assertions
+    from tracecite_mobile.analysis.scenario import validate_scenario_spec as mobile_validate
+
+    assert mobile_build_assertions is runtime_build_assertions
+    assert mobile_validate is runtime_validate
+
+
+def test_mobile_registers_through_public_extension_api() -> None:
+    from tracecite.extension import ExtensionAPI, get_runtime
+    from tracecite.runtime import DEFAULT_RUNTIME
+    from tracecite_mobile.analysis.scenario_runtime import MOBILE_RUNTIME
+    from tracecite_mobile.extension import TRACECITE_EXTENSION_API, register
+
+    assert TRACECITE_EXTENSION_API == "1"
+    assert DEFAULT_RUNTIME.allow_live_source is False
+    assert DEFAULT_RUNTIME.allow_actions is False
+
+    register(ExtensionAPI())
+
+    assert get_runtime("mobile") is MOBILE_RUNTIME
+
+
+def test_builtin_formats_do_not_force_replace_core_registrations() -> None:
+    source = (PACKAGE / "plugins" / "__init__.py").read_text(encoding="utf-8")
+    assert "replace=True" not in source
+    package_init = (PACKAGE / "__init__.py").read_text(encoding="utf-8")
+    assert "from . import plugins" not in package_init
 
 
 def test_mobile_has_no_upper_layer_inspection_surface() -> None:

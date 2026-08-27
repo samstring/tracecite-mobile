@@ -14,6 +14,7 @@ from ..shared.constants import (
     DEFAULT_LOG_OUTPUT_DIR,
 )
 
+from ..shared.log_paths import resolve_runs_dir
 from ..device.cleanup import CleanupError, clean_analysis_artifacts
 from ..shared.config import ProfileError, load_project_profile, write_profile_template
 from ..shared.update_check import (
@@ -84,8 +85,18 @@ def register_maintenance_commands(sub: argparse._SubParsersAction) -> None:
     )
     clean_analysis.add_argument(
         "--analysis-dir",
-        default=str(DEFAULT_ANALYSIS_OUTPUT_DIR),
-        help=f"分析归档目录，默认 {DEFAULT_ANALYSIS_OUTPUT_DIR}",
+        default=None,
+        help=f"分析归档目录，默认取 profile 或 {DEFAULT_ANALYSIS_OUTPUT_DIR}",
+    )
+    clean_analysis.add_argument(
+        "--include-archive",
+        action="store_true",
+        help="显式纳入隐藏归档（同时读取历史 archive/）；默认不触碰归档证据",
+    )
+    clean_analysis.add_argument(
+        "--yes",
+        action="store_true",
+        help="确认实际删除归档；仅与 --include-archive 且非 --dry-run 一起生效",
     )
     clean_analysis.add_argument("--dry-run", action="store_true", help="只预览，不删除")
     clean_analysis.add_argument("--json", action="store_true", help="以 JSON 输出结果")
@@ -149,12 +160,26 @@ def cmd_clean(args: argparse.Namespace) -> int:
         profile = load_project_profile(Path.cwd(), platform=args.platform)
         if args.clean_command != "analysis":
             raise CleanupError(f"未知 clean 子命令: {args.clean_command}")
+        log_dir = Path(args.log_dir).expanduser() if args.log_dir else profile.log_output_dir
+        capture_dir = (
+            Path(args.capture_dir).expanduser()
+            if args.capture_dir
+            else profile.capture_output_dir
+        )
+        runs_dir = profile.analysis_output_dir or resolve_runs_dir(args.platform, profile)
         result = clean_analysis_artifacts(
-            log_dir=Path(args.log_dir).expanduser() if args.log_dir else profile.log_output_dir,
-            capture_dir=Path(args.capture_dir).expanduser() if args.capture_dir else profile.capture_output_dir,
-            analysis_dir=Path(args.analysis_dir).expanduser(),
+            log_dir=log_dir,
+            capture_dir=capture_dir,
+            analysis_dir=(
+                Path(args.analysis_dir).expanduser()
+                if args.analysis_dir
+                else runs_dir
+            ),
             before=args.before,
             dry_run=args.dry_run,
+            include_archive=bool(args.include_archive),
+            confirm_archive=bool(args.yes),
+            extra_run_roots=((runs_dir,) if not args.analysis_dir else ()),
         )
         if args.json:
             print(json.dumps(result.to_dict(), ensure_ascii=False, indent=2))
@@ -167,7 +192,7 @@ def cmd_clean(args: argparse.Namespace) -> int:
             size_label = "预计释放" if args.dry_run else "释放空间"
             print(f"{size_label}: {result.total_size_bytes} bytes")
         return 0
-    except (CleanupError, ProfileError) as exc:
+    except (CleanupError, ProfileError, OSError) as exc:
         print(f"错误: {exc}", file=sys.stderr)
         return 1
 

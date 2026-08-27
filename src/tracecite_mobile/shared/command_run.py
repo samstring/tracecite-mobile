@@ -50,6 +50,42 @@ class CommandRun:
         )
         return frozen
 
+    def prepare_input(
+        self,
+        source: Path,
+        *,
+        role: str = "source_snapshot",
+        copy: Optional[bool] = None,
+    ) -> Path:
+        original = RunFile.from_path("source_original", source)
+        if original.sha256 is None:
+            raise RunIntegrityError(f"无法读取输入文件: {source}")
+        prepared, copied = self.workspace.prepare_input(
+            source,
+            index=self._input_index,
+            copy=copy,
+        )
+        self._input_index += 1
+        metadata = {
+            "source_path": original.path,
+            "source_size": original.size,
+        }
+        if copied:
+            metadata["source_sha256_at_freeze"] = original.sha256
+        else:
+            metadata["immutable"] = True
+            metadata["source_sha256"] = original.sha256
+        self.run.add_input(prepared, role=role, metadata=metadata)
+        return prepared
+
+    def prepare_inputs(
+        self,
+        sources: Iterable[Path],
+        *,
+        copy: Optional[bool] = None,
+    ) -> list[Path]:
+        return [self.prepare_input(source, copy=copy) for source in sources]
+
     def freeze_inputs(self, sources: Iterable[Path]) -> list[Path]:
         return [self.freeze_input(source) for source in sources]
 

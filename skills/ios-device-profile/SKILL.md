@@ -74,20 +74,21 @@ tracecite-mobile capture status --udid <UDID> --json
 tracecite-mobile capture stop --udid <UDID> --json
 ```
 
-默认 trace 目录是 `~/Desktop/TraceCite/Instrument/`；必须以 stop 的 JSON 输出为准，
+默认 trace 目录是 `~/Documents/TraceCite/mobile/iOS/instrument/`；必须以 stop 的 JSON 输出为准，
 记录实际 trace、toc、hang 摘要和分析路径。没有活动录制时不要反复 stop。
 
 ### 4. 联合日志分析
 
 ```bash
-tracecite-mobile filter --from-sessions --snapshot --last 5m --preset system-lifecycle --json
+tracecite-mobile seal --from-sessions --json
+tracecite-mobile filter --from-sessions --seal-first --last 5m --preset system-lifecycle --json
 tracecite-mobile behavior summarize "$FILTERED_LOG" --json
 ```
 
 根据问题再增加一条直接相关的过滤，例如网络：
 
 ```bash
-tracecite-mobile filter --from-sessions --snapshot --last 5m --grep 'request.started|request.failed' --json
+tracecite-mobile filter --from-sessions --seal-first --last 5m --grep 'request.started|request.failed' --json
 ```
 
 把复现操作、日志时间点与 trace 的录制区间对齐。若调用栈、行为链或故障信号不足，结论
@@ -98,10 +99,9 @@ tracecite-mobile filter --from-sessions --snapshot --last 5m --grep 'request.sta
 1. 必须实际执行 `tracecite-mobile`，并保留 start/stop JSON 结果。
 2. 多台设备必须先让用户选择；启动录制前确认目标 App 是否已运行。
 3. 默认 attach 已运行进程；只有启动分析才使用 `--launch`。
-4. trace 与日志必须使用同一复现时间窗，分析日志必经 snapshot filter。
-5. 回复采用“结论 → 证据 → 详细输出”，详细输出仅给 trace、evidence 和报告路径。
-6. 分析结束后，把结论追加到
-   `~/Desktop/TraceCite/analysis/conclusions/YYYY-MM-DD.md`。
+4. trace 与日志必须使用同一复现时间窗；live hot 用 `seal` / `--seal-first` 后再 filter。
+5. 回复采用“结论 → 证据 → 详细输出”，详细输出仅给 trace、manifest 与 evidence 路径。
+6. 分析 run 默认写入 `~/Documents/TraceCite/mobile/iOS/runs/`。
 7. 用户要求归档时，调用 `ios-analysis-package`，传入本轮真实 report、filtered log、
    raw log 与 trace 路径。
 
