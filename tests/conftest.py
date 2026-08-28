@@ -1,7 +1,7 @@
 """Explicitly host the Mobile extension for tests that exercise its formats."""
 
-from tracecite.extension import ExtensionAPI
-from tracecite_mobile.extension import register
+from tracecite.extension import register_extension
+from tracecite_mobile.extension import EXTENSION
 
 
-register(ExtensionAPI())
+register_extension(EXTENSION)
