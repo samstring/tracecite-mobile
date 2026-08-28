@@ -12,7 +12,7 @@ from typing import Any, Dict, Optional, Tuple
 from tracecite.runtime.scenario import *  # noqa: F401,F403
 from tracecite.runtime import scenario as _runtime_scenario
 
-from .scenario_runtime import MOBILE_RUNTIME
+from .scenario_runtime import mobile_runtime
 
 
 def resolve_pattern(
@@ -27,7 +27,7 @@ def resolve_pattern(
         platform=platform,
         start_dir=start_dir,
         profile=profile,
-        runtime=MOBILE_RUNTIME,
+        runtime=mobile_runtime(),
     )
 
 
@@ -45,7 +45,7 @@ def run_scenario(
         platform=platform,
         start_dir=start_dir,
         spec_path=spec_path,
-        runtime=MOBILE_RUNTIME,
+        runtime=mobile_runtime(),
     )
 
 
@@ -61,9 +61,9 @@ def explain_scenario(
         base_dir=base_dir,
         platform=platform,
         start_dir=start_dir,
-        runtime=MOBILE_RUNTIME,
+        runtime=mobile_runtime(),
     )
 
 
 def cmd_scenario(args) -> int:
-    return _runtime_scenario.cmd_scenario(args, runtime=MOBILE_RUNTIME)
+    return _runtime_scenario.cmd_scenario(args, runtime=mobile_runtime())
