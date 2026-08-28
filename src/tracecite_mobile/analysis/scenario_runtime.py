@@ -1,4 +1,10 @@
-"""Mobile scenario contribution for TraceCite Extension Protocol v2."""
+"""Mobile scenario contribution for TraceCite Extension Protocol v2.
+
+The public extension boundary is declarative ``ScenarioCapability``.  The
+legacy Mobile scenario facade still drives Core's current scenario engine,
+which accepts ``ScenarioRuntime`` internally; ``mobile_runtime()`` is therefore
+a private transition adapter rather than part of the extension contract.
+"""
 
 from __future__ import annotations
 
@@ -7,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from tracecite.extension import ScenarioCapability
+from tracecite.runtime import ScenarioRuntime
 
 
 def _load_profile(start_dir: Path, platform: str):
@@ -71,4 +78,20 @@ MOBILE_SCENARIO = ScenarioCapability(
 )
 
 
-__all__ = ["MOBILE_SCENARIO"]
+_MOBILE_RUNTIME = ScenarioRuntime(
+    load_profile=_load_profile,
+    resolve_scenario_pattern=_resolve_scenario_pattern,
+    context_files=_context_files,
+    loaded_plugins=_loaded_plugins,
+    runtime_versions=_runtime_versions,
+    allow_live_source=True,
+    allow_actions=True,
+)
+
+
+def mobile_runtime() -> ScenarioRuntime:
+    """Return the internal adapter used by the backward-compatible CLI facade."""
+    return _MOBILE_RUNTIME
+
+
+__all__ = ["MOBILE_SCENARIO", "mobile_runtime"]
