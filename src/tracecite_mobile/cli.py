@@ -105,13 +105,13 @@ def _check_knowledge_governance_on_start(args: argparse.Namespace) -> bool:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from tracecite.extension import ExtensionAPI
+    from tracecite.extension import register_extension
 
-    from .extension import register as register_extension
+    from .extension import EXTENSION
     from .plugin_sdk import load_analyzer_plugins
 
-    # The standalone Mobile CLI is an explicit host of the Mobile extension.
-    register_extension(ExtensionAPI())
+    # The standalone Mobile CLI is an explicit host of the declarative v2 extension.
+    register_extension(EXTENSION)
     plugin_results = load_analyzer_plugins(strict=False)
 
     parser = build_parser()
