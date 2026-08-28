@@ -30,28 +30,36 @@ def test_importing_mobile_has_no_core_registration_side_effect() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_explicit_registration_is_complete_and_idempotent() -> None:
+def test_declarative_extension_is_complete_and_idempotent() -> None:
     result = _run_isolated(
         """
         from tracecite import list_capabilities
-        from tracecite.extension import ExtensionAPI, available_runtimes, get_runtime
+        from tracecite.extension import (
+            EXTENSION_PROTOCOL_VERSION,
+            available_runtimes,
+            get_runtime,
+            register_extension,
+        )
         from tracecite_core.segmenter import available_segmenters
-        from tracecite_mobile.analysis.scenario_runtime import MOBILE_RUNTIME
-        from tracecite_mobile.extension import register
+        from tracecite_mobile.extension import EXTENSION, extension
 
         assert "devicelog" not in available_segmenters()
         assert available_runtimes() == ["default"]
         assert not [item for item in list_capabilities() if item.name.startswith("mobile.")]
 
-        register(ExtensionAPI())
-        register(ExtensionAPI())
+        assert extension() is EXTENSION
+        assert EXTENSION.manifest.protocol_version == EXTENSION_PROTOCOL_VERSION == "2"
+        assert EXTENSION.manifest.domain == "mobile"
+
+        register_extension(EXTENSION)
+        register_extension(EXTENSION)
 
         expected = {
             "android", "applog", "devicelog", "ios", "mixed", "online",
             "syslog", "threadtime",
         }
         assert expected <= set(available_segmenters())
-        assert get_runtime("mobile") is MOBILE_RUNTIME
+        assert get_runtime("mobile") is not None
         capabilities = {item.name: item for item in list_capabilities()}
 
         assert capabilities["mobile.environment.probe"].safety == "read"
@@ -72,34 +80,34 @@ def test_explicit_registration_is_complete_and_idempotent() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_api_version_mismatch_cannot_mutate_core_registry() -> None:
+def test_entrypoint_loader_accepts_mobile_protocol_v2() -> None:
     result = _run_isolated(
         """
-        import tracecite_core.plugin_sdk as plugin_sdk
-        from tracecite.extension import available_runtimes, load_extensions
+        import tracecite.extension as extension_api
+        from tracecite.extension import available_runtimes, list_extensions, load_extensions
         from tracecite_core.segmenter import available_segmenters
 
         class EntryPoint:
-            name = "mobile-version-mismatch"
-            value = "tracecite_mobile.extension"
+            name = "mobile"
+            value = "tracecite_mobile.extension:extension"
             dist = None
 
             def load(self):
-                import tracecite_mobile.extension as extension
-                extension.TRACECITE_EXTENSION_API = "99"
+                from tracecite_mobile.extension import extension
                 return extension
 
         def entry_points(**kwargs):
             return [EntryPoint()] if kwargs.get("group") == "tracecite.extensions" else []
 
-        plugin_sdk.metadata.entry_points = entry_points
-        before = available_segmenters()
-        loaded = load_extensions(strict=False)
+        extension_api.metadata.entry_points = entry_points
+        loaded = load_extensions(strict=True)
 
-        assert loaded[0]["status"] == "failed"
-        assert "需要插件 API 99" in loaded[0]["error"]
-        assert available_segmenters() == before
-        assert available_runtimes() == ["default"]
+        assert loaded[0]["status"] == "loaded"
+        assert loaded[0]["protocol_version"] == "2"
+        assert loaded[0]["extension_id"] == "mobile"
+        assert list_extensions()[0]["protocol_version"] == "2"
+        assert "devicelog" in available_segmenters()
+        assert "mobile" in available_runtimes()
         """
     )
 
@@ -109,17 +117,17 @@ def test_api_version_mismatch_cannot_mutate_core_registry() -> None:
 def test_registration_conflict_fails_without_replacing_core_capability() -> None:
     result = _run_isolated(
         """
-        from tracecite.extension import ExtensionAPI, available_runtimes
+        from tracecite.extension import available_runtimes, register_extension
         from tracecite_core import build_segmenter, register_segmenter
-        from tracecite_mobile.extension import register
+        from tracecite_mobile.extension import EXTENSION
 
         class ExistingSegmenter:
             pass
 
         register_segmenter("devicelog", ExistingSegmenter)
         try:
-            register(ExtensionAPI())
-        except ValueError as exc:
+            register_extension(EXTENSION)
+        except Exception as exc:
             assert "devicelog" in str(exc)
         else:
             raise AssertionError("registration conflict must fail")

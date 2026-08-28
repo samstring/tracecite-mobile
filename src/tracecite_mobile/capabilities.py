@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Mapping
 
 from tracecite import CapabilitySpec
-from tracecite.extension import ExtensionAPI
+from tracecite.extension import AgentCapability
 
 from .device_api import get_backend
 
@@ -132,7 +132,8 @@ _DEVICE_SCHEMA = {
 }
 
 
-def register_capabilities(api: ExtensionAPI) -> None:
+def agent_capabilities() -> tuple[AgentCapability, ...]:
+    """Return declarative Extension Protocol v2 capability contributions."""
     specs = [
         (
             CapabilitySpec(
@@ -265,17 +266,16 @@ def register_capabilities(api: ExtensionAPI) -> None:
             launch_app,
         ),
     ]
-    for spec, executor in specs:
-        api.register_capability(spec, executor)
+    return tuple(AgentCapability(spec=spec, executor=executor) for spec, executor in specs)
 
 
 __all__ = [
+    "agent_capabilities",
     "launch_app",
     "list_devices",
     "list_log_sessions",
     "list_processes",
     "probe_environment",
-    "register_capabilities",
     "start_log_session",
     "stop_log_session",
 ]

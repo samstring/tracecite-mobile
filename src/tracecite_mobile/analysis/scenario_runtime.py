@@ -1,4 +1,4 @@
-"""Mobile adapter for the generic :mod:`tracecite.runtime` engine."""
+"""Mobile scenario contribution for TraceCite Extension Protocol v2."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import importlib.metadata
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from tracecite.runtime import ScenarioRuntime
+from tracecite.extension import ScenarioCapability
 
 
 def _load_profile(start_dir: Path, platform: str):
@@ -59,7 +59,8 @@ def _runtime_versions() -> Mapping[str, str]:
     return {"tracecite_mobile": version}
 
 
-MOBILE_RUNTIME = ScenarioRuntime(
+MOBILE_SCENARIO = ScenarioCapability(
+    name="mobile",
     load_profile=_load_profile,
     resolve_scenario_pattern=_resolve_scenario_pattern,
     context_files=_context_files,
@@ -68,3 +69,6 @@ MOBILE_RUNTIME = ScenarioRuntime(
     allow_live_source=True,
     allow_actions=True,
 )
+
+
+__all__ = ["MOBILE_SCENARIO"]

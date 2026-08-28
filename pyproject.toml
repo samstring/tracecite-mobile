@@ -22,7 +22,7 @@ dependencies = [
 ]
 
 [project.entry-points."tracecite.extensions"]
-mobile = "tracecite_mobile.extension"
+mobile = "tracecite_mobile.extension:extension"
 
 [project.optional-dependencies]
 dev = ["build>=1", "pytest>=7"]
