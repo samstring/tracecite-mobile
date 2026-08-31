@@ -128,7 +128,10 @@ _PLATFORM_SCHEMA = {
 
 _DEVICE_SCHEMA = {
     "type": "string",
-    "description": "Stable iOS UDID or Android device identifier returned by mobile.devices.list.",
+    "description": (
+        "Stable iOS UDID or Android device identifier returned by mobile.devices.list; "
+        "do not invent or infer an unresolved device identifier."
+    ),
 }
 
 
@@ -139,7 +142,10 @@ def agent_capabilities() -> tuple[AgentCapability, ...]:
             CapabilitySpec(
                 name="mobile.environment.probe",
                 kind="query",
-                description="Check whether host tooling required by the iOS or Android backend is ready.",
+                description=(
+                    "Report host-local tool readiness for the selected iOS or Android backend. "
+                    "This is a mechanical readiness observation, not evidence that a device or app is healthy."
+                ),
                 input_schema={
                     "type": "object",
                     "properties": {"platform": _PLATFORM_SCHEMA},
@@ -154,7 +160,10 @@ def agent_capabilities() -> tuple[AgentCapability, ...]:
             CapabilitySpec(
                 name="mobile.devices.list",
                 kind="query",
-                description="List connected iOS or Android devices visible to TraceCite Mobile.",
+                description=(
+                    "List devices currently visible to TraceCite Mobile on the selected host/platform. "
+                    "An empty result is scoped to this observation and is not proof that no device exists elsewhere."
+                ),
                 input_schema={
                     "type": "object",
                     "properties": {"platform": _PLATFORM_SCHEMA},
@@ -169,7 +178,10 @@ def agent_capabilities() -> tuple[AgentCapability, ...]:
             CapabilitySpec(
                 name="mobile.processes.list",
                 kind="query",
-                description="List processes on one selected iOS or Android device.",
+                description=(
+                    "List the process snapshot currently visible on one explicitly selected iOS or Android device. "
+                    "A missing process is scoped to that snapshot and is not a root-cause conclusion."
+                ),
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -190,7 +202,10 @@ def agent_capabilities() -> tuple[AgentCapability, ...]:
             CapabilitySpec(
                 name="mobile.sessions.list",
                 kind="query",
-                description="List existing Mobile background log sessions for a platform.",
+                description=(
+                    "List Mobile background log-session bookkeeping for the selected platform. "
+                    "Session state is a mechanical fact and does not imply evidence sufficiency."
+                ),
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -208,7 +223,10 @@ def agent_capabilities() -> tuple[AgentCapability, ...]:
             CapabilitySpec(
                 name="mobile.sessions.start",
                 kind="action",
-                description="Start background log collection for one explicitly selected device.",
+                description=(
+                    "Authorized live action: start background log collection for one explicitly selected device. "
+                    "This mutates collection state only and does not interpret captured evidence."
+                ),
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -229,7 +247,10 @@ def agent_capabilities() -> tuple[AgentCapability, ...]:
             CapabilitySpec(
                 name="mobile.sessions.stop",
                 kind="action",
-                description="Stop background log collection for one explicitly selected device.",
+                description=(
+                    "Authorized live action: stop background log collection for one explicitly selected device. "
+                    "This mutates collection state only and does not establish evidence sufficiency."
+                ),
                 input_schema={
                     "type": "object",
                     "properties": {
@@ -249,7 +270,10 @@ def agent_capabilities() -> tuple[AgentCapability, ...]:
             CapabilitySpec(
                 name="mobile.app.launch",
                 kind="action",
-                description="Launch an app on one explicitly selected iOS or Android device.",
+                description=(
+                    "Authorized live action: launch an explicit app on one explicitly selected iOS or Android device. "
+                    "Backend success reports the action result only and does not prove app health."
+                ),
                 input_schema={
                     "type": "object",
                     "properties": {
