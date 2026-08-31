@@ -106,6 +106,19 @@ def test_agent_host_skill_mirrors_match_canonical() -> None:
         assert path.read_text(encoding="utf-8") == canonical
 
 
+def test_mobile_skill_tracks_bounded_mcp_handoff_contract() -> None:
+    text = (SKILLS / "tracecite-mobile" / "SKILL.md").read_text(encoding="utf-8")
+    for marker in (
+        "max_evidence <= 8",
+        "data.signal_hints",
+        "±3–5",
+        "aggregate",
+        "source_sha256",
+        "transport routing",
+    ):
+        assert marker in text
+
+
 @pytest.mark.parametrize(
     "argv",
     [
