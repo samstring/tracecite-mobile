@@ -1,9 +1,9 @@
 """Mobile scenario contribution for TraceCite Extension Protocol v2.
 
 The public extension boundary is declarative ``ScenarioCapability``.  The
-legacy Mobile scenario facade still drives Core's current scenario engine,
-which accepts ``ScenarioRuntime`` internally; ``mobile_runtime()`` is therefore
-a private transition adapter rather than part of the extension contract.
+backward-compatible Mobile scenario facade may still need Core's legacy
+``ScenarioRuntime`` injection seam, but that implementation detail is loaded
+lazily and is never required to import/register the Mobile extension.
 """
 
 from __future__ import annotations
@@ -13,7 +13,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from tracecite.extension import ScenarioCapability
-from tracecite.runtime import ScenarioRuntime
 
 
 def _load_profile(start_dir: Path, platform: str):
@@ -78,19 +77,31 @@ MOBILE_SCENARIO = ScenarioCapability(
 )
 
 
-_MOBILE_RUNTIME = ScenarioRuntime(
-    load_profile=_load_profile,
-    resolve_scenario_pattern=_resolve_scenario_pattern,
-    context_files=_context_files,
-    loaded_plugins=_loaded_plugins,
-    runtime_versions=_runtime_versions,
-    allow_live_source=True,
-    allow_actions=True,
-)
+_MOBILE_RUNTIME: Any = None
 
 
-def mobile_runtime() -> ScenarioRuntime:
-    """Return the internal adapter used by the backward-compatible CLI facade."""
+def mobile_runtime() -> Any:
+    """Return the private compatibility adapter for the legacy scenario facade.
+
+    Extension Protocol v2 intentionally exposes ``ScenarioCapability`` rather
+    than ``ScenarioRuntime``.  Import the old injection seam only when the
+    backward-compatible Mobile CLI facade actually executes a scenario so
+    extension discovery/registration stays on the public v2 contract.
+    """
+
+    global _MOBILE_RUNTIME
+    if _MOBILE_RUNTIME is None:
+        from tracecite.runtime.runtime import ScenarioRuntime
+
+        _MOBILE_RUNTIME = ScenarioRuntime(
+            load_profile=_load_profile,
+            resolve_scenario_pattern=_resolve_scenario_pattern,
+            context_files=_context_files,
+            loaded_plugins=_loaded_plugins,
+            runtime_versions=_runtime_versions,
+            allow_live_source=True,
+            allow_actions=True,
+        )
     return _MOBILE_RUNTIME
 
 
