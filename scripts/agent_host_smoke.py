@@ -19,7 +19,7 @@ def run_smoke() -> dict[str, object]:
     register_extension(EXTENSION)
     register_extension(EXTENSION)
 
-    extensions = {item["extension_id"]: item for item in list_extensions()}
+    extensions = {item["id"]: item for item in list_extensions()}
     assert extensions["mobile"]["protocol_version"] == "2"
 
     capabilities = {item.name: item for item in list_capabilities()}
