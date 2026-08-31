@@ -17,6 +17,7 @@ EXPECTED_SKILLS = {
     "ios-analysis-package",
     "ios-device-log",
     "ios-device-profile",
+    "tracecite-mobile",
 }
 LEGACY_MARKERS = (
     "已废弃",
@@ -94,6 +95,15 @@ def test_documented_mobile_commands_parse_without_device_access() -> None:
                 parser.parse_args(argv)
             parsed += 1
     assert parsed >= 30
+
+
+def test_agent_host_skill_mirrors_match_canonical() -> None:
+    canonical = (SKILLS / "tracecite-mobile" / "SKILL.md").read_text(encoding="utf-8")
+    for path in (
+        ROOT / ".agents" / "skills" / "tracecite-mobile" / "SKILL.md",
+        ROOT / ".pi" / "skills" / "tracecite-mobile" / "SKILL.md",
+    ):
+        assert path.read_text(encoding="utf-8") == canonical
 
 
 @pytest.mark.parametrize(
