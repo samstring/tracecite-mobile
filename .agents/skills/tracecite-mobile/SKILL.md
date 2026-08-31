@@ -37,6 +37,17 @@ TraceCite Mobile 负责：
 7. **coverage / novelty / status 不是结论。** 命中、零命中、`new_evidence=0`、覆盖完成或 source hash 都是可复核的运行事实，不自动等价于支持/反驳假设。
 8. **每一步都要有新的目的。** 优先最小操作；不要在没有 materially different purpose 的情况下反复读取同一设备状态或同一证据。
 
+## MCP 交接后的证据节奏
+
+当 Mobile 产物已经 seal，并通过 TraceCite MCP 继续调查时：
+
+1. **保持同一个 `session_id`。** 同一次 investigation 不要为每次查询创建新的 RetrievalSession。
+2. **一次只做一个 broad query。** 初始 broad query 通常使用 `max_evidence <= 8`；先读结果再决定下一步，不并行发多个同义 broad query。MCP 后续可能依据机械 session 状态自动收紧查询窗口，这只是 transport routing，不是根因排序或停止建议。
+3. **优先消费 `signal_hints`。** 如果结果被截断且返回 `data.signal_hints`，先由 Agent 选择一个候选，再对明确行号做 `materialize`；通常只取约 ±3–5 行上下文。hint 在 materialize 之前只是导航候选，不是可直接引用的正式 evidence。
+4. **重复模式先聚合。** 需要判断某类事件出现次数、distinct 或分组时优先 `aggregate`，不要先拉大量重复 evidence rows。
+5. **接受 MCP 的机械压缩。** 共享 `source` / `source_sha256` 可能提升到顶层，重复的 materialized text 也可能被抑制；被压缩掉的重复字段不代表“没有这个事实”。
+6. **精确 runtime signature 出现后切换工具。** 如果已经定位到明确错误、符号或调用点，而源码不属于 TraceCite-only evidence source，应改用 Agent 正常的源码搜索/读取工具继续代码推理，不把 TraceCite 当通用源码浏览器。
+
 ## Capability 选择
 
 | Capability | 类型 | 语义 |
