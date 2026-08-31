@@ -10,8 +10,8 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any, Dict, Mapping
 
-from tracecite import CapabilitySpec
 from tracecite.extension import AgentCapability
+from tracecite.runtime import CapabilitySpec
 
 from .device_api import get_backend
 
