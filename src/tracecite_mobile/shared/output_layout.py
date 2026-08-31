@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Mobile 默认 output 树；机制在 tracecite 公开 output_layout。"""
+"""Mobile default output tree built on TraceCite's public output-layout module."""
 
 from __future__ import annotations
 
@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict
 
-from tracecite import (
+from tracecite.output_layout import (
     deep_merge,
     load_output_config as public_load_output_config,
     write_output_config,
@@ -70,7 +70,9 @@ class OutputLayout:
     @classmethod
     def load(cls) -> "OutputLayout":
         config = load_output_config()
-        root = Path(str(config.get("output_root", DEFAULT_OUTPUT_CONFIG["output_root"]))).expanduser().resolve()
+        root = Path(
+            str(config.get("output_root", DEFAULT_OUTPUT_CONFIG["output_root"]))
+        ).expanduser().resolve()
         plugins = dict(config.get("plugins") or {})
         return cls(output_root=root, plugins=plugins)
 
@@ -97,7 +99,8 @@ class OutputLayout:
         platforms = mobile_entry.get("platforms") or {}
         platform_entry = platforms.get(selected) or {}
         platform_dir = mobile_root / str(
-            platform_entry.get("dir") or ("Android" if selected == "android" else "iOS")
+            platform_entry.get("dir")
+            or ("Android" if selected == "android" else "iOS")
         )
         return MobilePlatformLayout(
             root=platform_dir,
