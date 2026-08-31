@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>The official Mobile domain adapter for the TraceCite agent context gateway.</strong>
+  <strong>The official iOS / Android domain extension for the TraceCite Evidence Runtime.</strong>
 </p>
 
 <p align="center">
@@ -62,14 +62,12 @@ management is neither required nor recommended.
 Maintenance is explicit: `clean analysis --before today` removes only old
 logs, performance outputs, and unpinned completed analysis runs. Runtime state,
 locks, active/recovery outputs, and malformed manifests are kept fail-closed.
-The default pass inspects `~/Documents/TraceCite/mobile/*/runs/` and per-run directories under log/instrument `.runs` containers when outputs are redirected.
-and redirected `.runs` containers under log/capture outputs, one run directory
-at a time.
-Archive evidence is excluded by default. Preview it with
-`clean analysis --include-archive --dry-run`; an actual archive deletion
-requires both `--include-archive --yes`.
+The default pass inspects `~/Documents/TraceCite/mobile/*/runs/` and redirected
+`.runs` containers one run directory at a time. Archive evidence is excluded by
+default. Preview it with `clean analysis --include-archive --dry-run`; an actual
+archive deletion requires both `--include-archive --yes`.
 
-After one full investigation, the agent has:
+After one full investigation, the Agent has:
 
 - **Structured hits within a time window** — which line, what time, what keyword matched
 - **User behavior event stream** — "user opened settings → tapped save → app froze"
@@ -90,6 +88,21 @@ tracecite-mobile filter app.log --preset memory-leak --json
 tracecite-mobile filter app.log --preset network-http --grep 'checkout|payment' --json
 ```
 
+## Agent-native contract
+
+TraceCite Mobile is an evidence-acquisition extension, not a planner or root-cause oracle.
+The Agent owns hypotheses, investigation order, causal interpretation, evidence sufficiency,
+the final conclusion, and when to stop.
+
+Mobile exposes scoped mechanical facts and explicit live actions. Device/process/session
+queries do not become global absence claims, and successful live actions do not establish
+app health or root cause. Generic evidence retrieval, exact materialization/replay,
+aggregation, traversal, verification, provenance, and RetrievalSession novelty belong to
+the main TraceCite Evidence Runtime.
+
+See [Agent integration](docs/agent-integration.md) and the repository skill at
+[`skills/tracecite-mobile/SKILL.md`](skills/tracecite-mobile/SKILL.md).
+
 ## vs. Dumping Raw Logs to AI
 
 | | Raw logs to AI | TraceCite Mobile |
@@ -103,24 +116,26 @@ tracecite-mobile filter app.log --preset network-http --grep 'checkout|payment' 
 
 ## Architecture
 
-The main TraceCite distribution provides Core evidence primitives, the generic
-Runtime, and the versioned Extension API. Mobile stays independent and
-registers its device adapters and domain semantics through
-`tracecite.extensions`:
+The main TraceCite distribution provides the canonical Evidence Runtime and the
+versioned Extension API. TraceCite MCP can project those same evidence semantics
+to MCP Hosts. Mobile stays independent and contributes iOS / Android domain
+capabilities through `tracecite.extensions`:
 
 ```text
-External Agent
-      |
-TraceCite Runtime ---- tracecite-mobile
-      |
-TraceCite Core
+External Agent / Host
+        |
+TraceCite Evidence Runtime ---- TraceCite MCP (optional transport)
+        |
+tracecite-mobile
+        |
+iOS / Android devices
 ```
 
 Importing either `tracecite` or `tracecite_mobile` does not register Mobile
-formats or mutate the Core registry. Use
-`tracecite extension load` or `tracecite run ... --load-extensions --runtime mobile`
-when the main Runtime should discover the installed Mobile extension.
-The standalone `tracecite-mobile` CLI explicitly hosts the same extension
+formats or mutate the Core registry. Use `tracecite extension load` or
+`tracecite run ... --load-extensions --runtime mobile` when the main Runtime
+should discover the installed Mobile extension. The standalone `tracecite-mobile`
+CLI explicitly hosts the same declarative Extension Protocol v2 contribution
 before dispatching a command.
 
 <img src="architecture.svg" alt="Mobile architecture: Device, Analysis, Knowledge, Plugin layers on Core" width="100%"/>
@@ -136,30 +151,33 @@ tracecite-mobile --platform android performance start --profile frame --json
 
 ## Customization
 
-**Presets.** Stop writing regex every time. Pre-built keyword sets for common scenarios:
+**Presets.** Stop writing regex every time. Pre-built keyword sets cover common scenarios,
+and project-specific candidates remain governed and auditable:
 
 ```bash
 tracecite-mobile filter app.log --preset system-lifecycle --json
 tracecite-mobile filter app.log --preset network-http --grep 'checkout|payment' --json
-tracecite-mobile grow propose term my-preset "payment failed" "network timeout" \
+tracecite-mobile grow propose scenario task-flow --title "Task flow" \
   --created-by agent-a --case-id run-001 --evidence evidence://run/001#manifest
 ```
 
-**Scenario files.** Save investigation steps as JSON — team-sharable, version-controllable:
+**Scenario files.** Save deterministic analysis mechanics as JSON — team-sharable and version-controllable. The Agent still owns the investigation strategy and causal conclusions:
 
 ```json
 {
+  "schema_version": 2,
   "name": "crash-investigation",
-  "source": { "type": "session", "device": "ios" },
-  "filter": {
-    "stages": [
-      { "grep": "SIGABRT|SIGSEGV", "scope": { "last": "2m" } },
-      { "grep": "backtrace|callstack" }
-    ]
-  },
+  "source": { "type": "file", "path": "sealed.log" },
+  "parse": { "segmenter": "auto" },
+  "filter": { "grep": "SIGABRT|SIGSEGV" },
   "assert": {
     "rules": [
-      { "type": "contains", "match": "SIGABRT", "min": 1 }
+      {
+        "name": "has-sigabrt",
+        "type": "count",
+        "event": { "match": "SIGABRT" },
+        "min": 1
+      }
     ]
   }
 }
@@ -190,7 +208,9 @@ integrity gate until restored through the governed workflow.
 
 ## See Also
 
-- [**TraceCite**](../tracecite-core/) — main distribution: Core, Runtime, and Extension API.
+- [**TraceCite**](../tracecite-core/) — canonical Evidence Runtime and Extension API.
+- [Agent integration](docs/agent-integration.md) — Mobile Host/Agent contract.
+- [Agent 接入（简体中文）](docs/agent-integration.zh-CN.md) — Chinese integration contract.
 
 ## License
 
