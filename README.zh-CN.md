@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <strong>让 Agent 直接分析手机上的日志 — 基于 TraceCite Core 构建。</strong>
+  <strong>TraceCite Evidence Runtime 的官方 iOS / Android 领域扩展。</strong>
 </p>
 
 <p align="center">
@@ -30,12 +30,9 @@
 ## 安装
 
 ```bash
-# 先装 tracecite-core：https://github.com/xxx/tracecite-core
-git clone https://github.com/xxx/tracecite-core
-pip install -e ./tracecite-core
-
-# 再装 Mobile
-pip install -e .
+# 先安装 TraceCite，再安装 Mobile 扩展
+pip install tracecite
+pip install tracecite-mobile
 tracecite-mobile profile init
 ```
 
@@ -59,19 +56,19 @@ tracecite-mobile behavior summarize --from-sessions --json
 
 实时日志默认保留最近 30 分钟作为 hot 窗口；采集器每 30 分钟执行一次归档检查，
 把已过期的数据移入隐藏的内部 `.archive/`。日常只需使用 `archive list` 和
- `archive pull`，不需要、也不建议直接管理该目录。
+`archive pull`，不需要、也不建议直接管理该目录。
 
 维护清理是显式操作：`clean analysis --before today` 只清理过期日志、性能产物
 和未 pinned 的已完成分析运行；运行状态、锁、仍在采集/恢复中的产物以及损坏的
-manifest 会 fail-closed 保留。分析 run 默认清理 `~/Documents/TraceCite/mobile/*/runs/`（及 profile 指定的 `analysis_output_dir`）；日志/性能目录下的 `.runs` 容器也会逐个 run 判断。归档证据默认不碰；先用
+manifest 会 fail-closed 保留。归档证据默认不碰；先用
 `clean analysis --include-archive --dry-run` 预览，实际删除必须同时指定
 `--include-archive --yes`。
 
-一次完整的排查跑下来，Agent 拿到：
+一次完整的排查跑下来，Agent 可以拿到：
 
 - **时间窗内的结构化命中** — 哪一行、什么时间、匹配了什么关键词
 - **用户行为事件流** — 「用户打开了设置页 → 点击了保存 → App 卡死」
-- **完整的运行记录** — 输入被冻结、参数被记录，随时可复现
+- **完整的运行记录** — 输入被冻结、参数被记录，随时可复核
 
 ```bash
 # 卡顿问题？同步录制性能采样
@@ -88,6 +85,25 @@ tracecite-mobile filter app.log --preset memory-leak --json
 tracecite-mobile filter app.log --preset network-http --grep 'checkout|payment' --json
 ```
 
+## Agent-native 契约
+
+TraceCite Mobile 是**移动端证据采集扩展**，不是 planner、根因判定器或停止策略引擎。
+
+Agent 负责：假设、排查顺序、因果解释、证据充分性、最终结论以及何时停止。
+Mobile 负责：当前 host / platform / device 范围内的机械事实，以及经过明确授权的 live action。
+
+因此：设备/进程/session 查询为空，只能说明当前范围内这次观察没有看到；不能直接升级成全局不存在。
+`session start/stop` 或 App launch 成功，也只表示动作成功，不代表 App 健康、根因成立或证据已经充分。
+
+通用证据检索、精确 materialize/replay、aggregate、traverse、verify、provenance、
+RetrievalSession novelty 等语义统一由 TraceCite Evidence Runtime 负责。
+
+完整约定见：
+
+- [Agent 接入（简体中文）](docs/agent-integration.zh-CN.md)
+- [Agent integration (English)](docs/agent-integration.md)
+- [`skills/tracecite-mobile/SKILL.md`](skills/tracecite-mobile/SKILL.md)
+
 ## 相比直接丢日志给 AI
 
 | | 丢日志给 AI | TraceCite Mobile |
@@ -96,14 +112,30 @@ tracecite-mobile filter app.log --preset network-http --grep 'checkout|payment' 
 | 数据种类 | 只有文本日志 | 日志 + 性能采样，一条命令录制 |
 | 分析输出 | 原始文本，AI 自己解析 | 结构化 JSON + 用户行为事件 |
 | 用户行为 | AI 从日志字符串推断 | 自动提升为结构化行为事件 |
-| 知识积累 | 无 | 本地知识库，越用越有效 |
-| 可复现 | 两次分析中间步骤不同 | 运行清单记录所有参数，冻结输入 |
+| 知识积累 | 无 | 可审计的项目本地 candidate / trusted knowledge |
+| 可复现 | 两次分析中间步骤不同 | run manifest 记录参数、输入与证据路径 |
 
 ## 整体架构
 
-Core 提供了文本分析的引擎。Mobile 在此基础上加了四层：
+TraceCite 主包提供 canonical Evidence Runtime 与版本化 Extension API；
+TraceCite MCP 可以把同一套 Evidence 语义投影给 MCP Host。Mobile 保持独立，
+只贡献 iOS / Android 领域能力：
 
-<img src="architecture.svg" alt="Mobile 架构：设备层、分析层、知识层、插件层，底层为 Core" width="100%"/>
+```text
+External Agent / Host
+        |
+TraceCite Evidence Runtime ---- TraceCite MCP（可选 transport）
+        |
+tracecite-mobile
+        |
+iOS / Android devices
+```
+
+单纯 `import tracecite` 或 `import tracecite_mobile` 不会自动修改 Core registry。
+需要由 Host 显式加载 extension；独立 `tracecite-mobile` CLI 会在命令分发前显式
+host 同一个 Extension Protocol v2 声明。
+
+<img src="architecture.svg" alt="Mobile 架构：设备层、分析层、知识层、插件层，底层为 TraceCite Evidence Runtime" width="100%"/>
 
 `--platform ios|android` 通过同一能力契约切换平台。可用
 `performance profiles` 查询当前平台的性能 profile；未声明的可选能力会明确失败，
@@ -116,29 +148,33 @@ tracecite-mobile --platform android performance start --profile frame --json
 
 ## 自定义流程
 
-**预设词表。** 不用每次手写正则。常见场景有预设好的关键词集合：
+**预设词表。** 通用 preset 可以直接复用；项目特有知识通过 candidate → verify → promote 的治理流程沉淀：
 
 ```bash
 tracecite-mobile filter app.log --preset system-lifecycle --json
 tracecite-mobile filter app.log --preset network-http --grep 'checkout|payment' --json
-tracecite-mobile preset add --name my-preset --terms "支付失败, 网络超时, 订单异常"
+tracecite-mobile grow propose scenario task-flow --title "Task flow" \
+  --created-by agent-a --case-id run-001 --evidence evidence://run/001#manifest
 ```
 
-**场景文件。** 把排查流程写成 JSON，团队共享、版本控制：
+**场景文件。** 把确定性的采集/过滤/断言机械流程写成 JSON，团队共享、版本控制；
+排查策略和因果结论仍由 Agent 负责：
 
 ```json
 {
+  "schema_version": 2,
   "name": "crash-investigation",
-  "source": { "type": "session", "device": "ios" },
-  "filter": {
-    "stages": [
-      { "grep": "SIGABRT|SIGSEGV", "scope": { "last": "2m" } },
-      { "grep": "backtrace|callstack" }
-    ]
-  },
+  "source": { "type": "file", "path": "sealed.log" },
+  "parse": { "segmenter": "auto" },
+  "filter": { "grep": "SIGABRT|SIGSEGV" },
   "assert": {
     "rules": [
-      { "type": "contains", "match": "SIGABRT", "min": 1 }
+      {
+        "name": "has-sigabrt",
+        "type": "count",
+        "event": { "match": "SIGABRT" },
+        "min": 1
+      }
     ]
   }
 }
@@ -148,18 +184,27 @@ tracecite-mobile preset add --name my-preset --terms "支付失败, 网络超时
 tracecite-mobile scenario run crash-investigation.json
 ```
 
-**知识积累。** 查过的问题、发现过的特征，自动沉淀到本地知识库：
+**知识治理。** Agent 发现先进入独立 candidate store；第二个独立案例负责 verify，
+再由不同 reviewer 授权 promote：
 
 ```bash
-tracecite-mobile grow auto app.log --preset my-app   # 自动从日志发现高频特征
-tracecite-mobile grow audit --preset my-app           # 清理不再有用的词
+tracecite-mobile grow suggest app.log --preset my-app
+tracecite-mobile grow propose learning "Bounded evidence is required" \
+  --created-by agent-a --case-id run-001 --evidence evidence://run/001#manifest
+tracecite-mobile grow verify kc-ID --case-id run-002 --outcome support \
+  --verified-by agent-b --evidence evidence://run/002#manifest
+tracecite-mobile grow promote kc-ID --approved-by human-reviewer
+tracecite-mobile grow doctor
 ```
 
-所有知识存在 `.tracecite/` 本地目录，不联网。
+旧的直接写入方式（例如 `preset add`、`grow term/marker/learning/playbook/auto`）
+在 Agent CLI 中会被拒绝。candidate 与 trusted knowledge 物理分离保存在 `.tracecite/`，
+不上传；trusted 文件发生未治理修改时会触发完整性门禁。
 
 ## 相关包
 
-- [**tracecite-core**](../tracecite-core/) — 底层的文本分析引擎。
+- [**TraceCite**](../tracecite-core/) — canonical Evidence Runtime 与 Extension API。
+- [Agent 接入](docs/agent-integration.zh-CN.md) — Mobile Agent / Host 完整契约。
 
 ## 许可证
 
