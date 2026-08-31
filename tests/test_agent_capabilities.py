@@ -102,3 +102,39 @@ def test_launch_app_maps_explicit_device_and_app(monkeypatch) -> None:
 
     assert launched["pid"] == 99
     assert ("launch_app", "D1", "com.example.app") in backend.calls
+
+
+def test_agent_capability_contract_exposes_scope_and_authorization() -> None:
+    specs = {cap.spec.name: cap.spec for cap in caps.agent_capabilities()}
+
+    assert set(specs) == {
+        "mobile.environment.probe",
+        "mobile.devices.list",
+        "mobile.processes.list",
+        "mobile.sessions.list",
+        "mobile.sessions.start",
+        "mobile.sessions.stop",
+        "mobile.app.launch",
+    }
+
+    assert specs["mobile.environment.probe"].safety == "read"
+    assert specs["mobile.environment.probe"].requires_authorization is False
+    assert "mechanical" in specs["mobile.environment.probe"].description.lower()
+
+    for name in ("mobile.devices.list", "mobile.processes.list", "mobile.sessions.list"):
+        assert specs[name].kind == "query"
+        assert specs[name].safety == "live_source"
+        assert specs[name].requires_authorization is False
+
+    assert "scoped" in specs["mobile.devices.list"].description.lower()
+    assert "root-cause" in specs["mobile.processes.list"].description.lower()
+    assert "sufficiency" in specs["mobile.sessions.list"].description.lower()
+
+    for name in ("mobile.sessions.start", "mobile.sessions.stop", "mobile.app.launch"):
+        assert specs[name].kind == "action"
+        assert specs[name].safety == "live_action"
+        assert specs[name].requires_authorization is True
+        assert "authorized live action" in specs[name].description.lower()
+
+    device_schema = specs["mobile.processes.list"].input_schema["properties"]["device"]
+    assert "do not invent" in device_schema["description"].lower()
