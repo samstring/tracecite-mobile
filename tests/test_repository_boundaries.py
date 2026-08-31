@@ -51,14 +51,15 @@ def test_mobile_scenario_compatibility_imports_use_runtime_implementation() -> N
 
 def test_mobile_registers_through_public_extension_v2_contract() -> None:
     from tracecite.extension import EXTENSION_PROTOCOL_VERSION, get_runtime, register_extension
-    from tracecite.runtime import DEFAULT_RUNTIME
     from tracecite_mobile.extension import EXTENSION
 
     assert EXTENSION_PROTOCOL_VERSION == "2"
     assert EXTENSION.manifest.protocol_version == "2"
     assert EXTENSION.manifest.id == "mobile"
-    assert DEFAULT_RUNTIME.allow_live_source is False
-    assert DEFAULT_RUNTIME.allow_actions is False
+
+    default_runtime = get_runtime("default")
+    assert default_runtime.allow_live_source is False
+    assert default_runtime.allow_actions is False
 
     register_extension(EXTENSION)
     runtime = get_runtime("mobile")
