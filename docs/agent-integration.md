@@ -18,7 +18,7 @@ TraceCite Mobile extension
 iOS / Android host tools and devices
 ```
 
-TraceCite Core owns the canonical Evidence API, Extension Protocol v2, RetrievalSession mechanics, provenance, coverage, materialization/replay, aggregation, traversal, and verification.
+TraceCite Core owns the canonical Evidence API, TraceCite Extension Protocol, RetrievalSession mechanics, provenance, coverage, materialization/replay, aggregation, traversal, and verification.
 
 TraceCite MCP is an optional transport projection over those canonical semantics.
 
@@ -32,7 +32,7 @@ The installed package exposes:
 tracecite.extensions -> mobile = tracecite_mobile.extension:extension
 ```
 
-The extension manifest uses Extension Protocol v2 and contributes:
+The extension manifest uses the TraceCite Extension Protocol and contributes:
 
 - Mobile Core/plugin registration;
 - Agent-facing mobile capabilities;
