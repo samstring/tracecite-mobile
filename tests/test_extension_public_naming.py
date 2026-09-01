@@ -26,3 +26,18 @@ def test_mobile_still_uses_core_machine_protocol_version() -> None:
     from tracecite_mobile.extension import EXTENSION
 
     assert EXTENSION.manifest.protocol_version == EXTENSION_PROTOCOL_VERSION == "2"
+
+
+def test_mobile_scenario_has_one_runtime_path() -> None:
+    from tracecite.extension import get_runtime, register_extension
+    from tracecite_mobile.analysis import scenario
+    from tracecite_mobile.extension import EXTENSION
+
+    source = (ROOT / "src/tracecite_mobile/analysis/scenario_runtime.py").read_text(
+        encoding="utf-8"
+    )
+    assert "ScenarioRuntime" not in source
+    assert "mobile_runtime" not in source
+
+    register_extension(EXTENSION)
+    assert scenario._mobile_runtime() is get_runtime("mobile")
