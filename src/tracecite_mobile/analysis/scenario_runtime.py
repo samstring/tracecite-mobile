@@ -1,10 +1,4 @@
-"""Mobile scenario contribution for the TraceCite Extension Protocol.
-
-The public extension boundary is declarative ``ScenarioCapability``.  The
-backward-compatible Mobile scenario facade may still need Core's legacy
-``ScenarioRuntime`` injection seam, but that implementation detail is loaded
-lazily and is never required to import/register the Mobile extension.
-"""
+"""Mobile scenario capability for the TraceCite Extension Protocol."""
 
 from __future__ import annotations
 
@@ -77,32 +71,4 @@ MOBILE_SCENARIO = ScenarioCapability(
 )
 
 
-_MOBILE_RUNTIME: Any = None
-
-
-def mobile_runtime() -> Any:
-    """Return the private compatibility adapter for the legacy scenario facade.
-
-    The public extension contract exposes ``ScenarioCapability`` rather than
-    ``ScenarioRuntime``. Import the old injection seam only when the
-    backward-compatible Mobile CLI facade actually executes a scenario so
-    extension discovery/registration stays on the public extension contract.
-    """
-
-    global _MOBILE_RUNTIME
-    if _MOBILE_RUNTIME is None:
-        from tracecite.runtime.runtime import ScenarioRuntime
-
-        _MOBILE_RUNTIME = ScenarioRuntime(
-            load_profile=_load_profile,
-            resolve_scenario_pattern=_resolve_scenario_pattern,
-            context_files=_context_files,
-            loaded_plugins=_loaded_plugins,
-            runtime_versions=_runtime_versions,
-            allow_live_source=True,
-            allow_actions=True,
-        )
-    return _MOBILE_RUNTIME
-
-
-__all__ = ["MOBILE_SCENARIO", "mobile_runtime"]
+__all__ = ["MOBILE_SCENARIO"]
