@@ -30,7 +30,7 @@ EXTENSION = TraceCiteExtension(
 
 
 def extension() -> TraceCiteExtension:
-    """Return the stable Extension Protocol v2 declaration."""
+    """Return the stable TraceCite Extension declaration."""
     return EXTENSION
 
 
