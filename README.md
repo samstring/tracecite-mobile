@@ -117,7 +117,7 @@ See [Agent integration](docs/agent-integration.md) and the repository skill at
 ## Architecture
 
 The main TraceCite distribution provides the canonical Evidence Runtime and the
-versioned Extension API. TraceCite MCP can project those same evidence semantics
+TraceCite Extension Protocol. TraceCite MCP can project those same evidence semantics
 to MCP Hosts. Mobile stays independent and contributes iOS / Android domain
 capabilities through `tracecite.extensions`:
 
@@ -135,7 +135,7 @@ Importing either `tracecite` or `tracecite_mobile` does not register Mobile
 formats or mutate the Core registry. Use `tracecite extension load` or
 `tracecite run ... --load-extensions --runtime mobile` when the main Runtime
 should discover the installed Mobile extension. The standalone `tracecite-mobile`
-CLI explicitly hosts the same declarative Extension Protocol v2 contribution
+CLI explicitly hosts the same declarative TraceCite Extension contribution
 before dispatching a command.
 
 <img src="architecture.svg" alt="Mobile architecture: Device, Analysis, Knowledge, Plugin layers on Core" width="100%"/>
@@ -208,7 +208,7 @@ integrity gate until restored through the governed workflow.
 
 ## See Also
 
-- [**TraceCite**](../tracecite-core/) — canonical Evidence Runtime and Extension API.
+- [**TraceCite**](../tracecite-core/) — canonical Evidence Runtime and Extension Protocol.
 - [Agent integration](docs/agent-integration.md) — Mobile Host/Agent contract.
 - [Agent 接入（简体中文）](docs/agent-integration.zh-CN.md) — Chinese integration contract.
 
