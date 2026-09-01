@@ -1,7 +1,7 @@
-"""Backward-compatible Mobile facade for :mod:`tracecite.runtime.scenario`.
+"""Mobile facade for :mod:`tracecite.runtime.scenario`.
 
-Existing ``tracecite_mobile.analysis.scenario`` imports remain valid while the
-implementation and schemas live in the generic Agent package.
+Existing ``tracecite_mobile.analysis.scenario`` imports remain valid while Core
+owns the actual scenario runtime created from ``MOBILE_SCENARIO``.
 """
 
 from __future__ import annotations
@@ -12,7 +12,13 @@ from typing import Any, Dict, Optional, Tuple
 from tracecite.runtime.scenario import *  # noqa: F401,F403
 from tracecite.runtime import scenario as _runtime_scenario
 
-from .scenario_runtime import mobile_runtime
+
+def _mobile_runtime():
+    from tracecite.extension import get_runtime, register_extension
+    from ..extension import EXTENSION
+
+    register_extension(EXTENSION)
+    return get_runtime("mobile")
 
 
 def resolve_pattern(
@@ -27,7 +33,7 @@ def resolve_pattern(
         platform=platform,
         start_dir=start_dir,
         profile=profile,
-        runtime=mobile_runtime(),
+        runtime=_mobile_runtime(),
     )
 
 
@@ -45,7 +51,7 @@ def run_scenario(
         platform=platform,
         start_dir=start_dir,
         spec_path=spec_path,
-        runtime=mobile_runtime(),
+        runtime=_mobile_runtime(),
     )
 
 
@@ -61,9 +67,9 @@ def explain_scenario(
         base_dir=base_dir,
         platform=platform,
         start_dir=start_dir,
-        runtime=mobile_runtime(),
+        runtime=_mobile_runtime(),
     )
 
 
 def cmd_scenario(args) -> int:
-    return _runtime_scenario.cmd_scenario(args, runtime=mobile_runtime())
+    return _runtime_scenario.cmd_scenario(args, runtime=_mobile_runtime())
