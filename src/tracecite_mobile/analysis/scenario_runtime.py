@@ -1,4 +1,4 @@
-"""Mobile scenario contribution for TraceCite Extension Protocol v2.
+"""Mobile scenario contribution for the TraceCite Extension Protocol.
 
 The public extension boundary is declarative ``ScenarioCapability``.  The
 backward-compatible Mobile scenario facade may still need Core's legacy
@@ -83,10 +83,10 @@ _MOBILE_RUNTIME: Any = None
 def mobile_runtime() -> Any:
     """Return the private compatibility adapter for the legacy scenario facade.
 
-    Extension Protocol v2 intentionally exposes ``ScenarioCapability`` rather
-    than ``ScenarioRuntime``.  Import the old injection seam only when the
+    The public extension contract exposes ``ScenarioCapability`` rather than
+    ``ScenarioRuntime``. Import the old injection seam only when the
     backward-compatible Mobile CLI facade actually executes a scenario so
-    extension discovery/registration stays on the public v2 contract.
+    extension discovery/registration stays on the public extension contract.
     """
 
     global _MOBILE_RUNTIME
