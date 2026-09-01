@@ -80,7 +80,7 @@ def test_declarative_extension_is_complete_and_idempotent() -> None:
     assert result.returncode == 0, result.stderr
 
 
-def test_entrypoint_loader_accepts_mobile_protocol_v2() -> None:
+def test_entrypoint_loader_accepts_current_mobile_protocol() -> None:
     result = _run_isolated(
         """
         import tracecite.extension as extension_api
