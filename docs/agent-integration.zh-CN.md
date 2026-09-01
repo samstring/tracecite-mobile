@@ -16,7 +16,7 @@ TraceCite Mobile extension
 iOS / Android host tools and devices
 ```
 
-TraceCite Core 负责 canonical Evidence API、Extension Protocol v2、RetrievalSession、provenance、coverage、materialize/replay、aggregate、traverse、verify 等通用证据语义。
+TraceCite Core 负责 canonical Evidence API、TraceCite Extension Protocol、RetrievalSession、provenance、coverage、materialize/replay、aggregate、traverse、verify 等通用证据语义。
 
 TraceCite MCP 是这些 canonical 语义之上的可选 Agent transport 投影层。
 
@@ -30,7 +30,7 @@ TraceCite Mobile 只负责移动端特有的设备发现、进程/session 事实
 tracecite.extensions -> mobile = tracecite_mobile.extension:extension
 ```
 
-Mobile extension 使用 Extension Protocol v2，贡献：
+Mobile extension 使用 TraceCite Extension Protocol，贡献：
 
 - Mobile Core/plugin 注册；
 - Agent-facing Mobile capabilities；
