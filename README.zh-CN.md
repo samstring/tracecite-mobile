@@ -117,7 +117,7 @@ RetrievalSession novelty 等语义统一由 TraceCite Evidence Runtime 负责。
 
 ## 整体架构
 
-TraceCite 主包提供 canonical Evidence Runtime 与版本化 Extension API；
+TraceCite 主包提供 canonical Evidence Runtime 与 TraceCite Extension Protocol；
 TraceCite MCP 可以把同一套 Evidence 语义投影给 MCP Host。Mobile 保持独立，
 只贡献 iOS / Android 领域能力：
 
@@ -133,7 +133,7 @@ iOS / Android devices
 
 单纯 `import tracecite` 或 `import tracecite_mobile` 不会自动修改 Core registry。
 需要由 Host 显式加载 extension；独立 `tracecite-mobile` CLI 会在命令分发前显式
-host 同一个 Extension Protocol v2 声明。
+host 同一个 declarative TraceCite Extension 声明。
 
 <img src="architecture.svg" alt="Mobile 架构：设备层、分析层、知识层、插件层，底层为 TraceCite Evidence Runtime" width="100%"/>
 
@@ -203,7 +203,7 @@ tracecite-mobile grow doctor
 
 ## 相关包
 
-- [**TraceCite**](../tracecite-core/) — canonical Evidence Runtime 与 Extension API。
+- [**TraceCite**](../tracecite-core/) — canonical Evidence Runtime 与 Extension Protocol。
 - [Agent 接入](docs/agent-integration.zh-CN.md) — Mobile Agent / Host 完整契约。
 
 ## 许可证
