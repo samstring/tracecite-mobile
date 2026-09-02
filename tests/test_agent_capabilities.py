@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import tracecite_mobile.capabilities as caps
 from tracecite_mobile.platforms.models import (
@@ -40,15 +41,35 @@ class FakeBackend:
 
     def list_sessions(self, *, devices=None, output_dir=None, **kwargs):
         self.calls.append(("list_sessions", str(output_dir) if output_dir else None))
-        return SessionStatus("ios", state="running", sessions=(SessionRef("ios", "S1", device=self.device),))
+        return SessionStatus(
+            "ios",
+            state="running",
+            sessions=(SessionRef("ios", "S1", device=self.device, output_path=Path("/tmp/live.log")),),
+        )
 
     def start_sessions(self, devices, *, package="", output_dir=None, **kwargs):
         self.calls.append(("start_sessions", [item.identifier for item in devices], package, str(output_dir) if output_dir else None))
-        return SessionStatus("ios", state="running", sessions=(SessionRef("ios", "S1", device=self.device),))
+        return SessionStatus(
+            "ios",
+            state="running",
+            sessions=(SessionRef("ios", "S1", device=self.device, output_path=Path("/tmp/live.log")),),
+        )
 
     def stop_sessions(self, *, devices=None, all_devices=False, output_dir=None, **kwargs):
         self.calls.append(("stop_sessions", [item.identifier for item in devices or []], all_devices, str(output_dir) if output_dir else None))
-        return SessionStatus("ios", state="stopped")
+        return SessionStatus(
+            "ios",
+            state="stopped",
+            sessions=(
+                SessionRef(
+                    "ios",
+                    "S1",
+                    device=self.device,
+                    output_path=Path("/tmp/stable.log"),
+                    state="stopped",
+                ),
+            ),
+        )
 
     def launch_app(self, device, app, **kwargs):
         self.calls.append(("launch_app", device.identifier, app))
@@ -90,9 +111,31 @@ def test_session_actions_require_explicit_device_in_executor(monkeypatch, tmp_pa
     })
 
     assert started["state"] == "running"
+    assert "artifacts" not in started
     assert stopped["state"] == "stopped"
+    assert stopped["evidence_files"] == ["/tmp/stable.log"]
+    assert stopped["artifacts"] == [
+        {
+            "kind": "device_log",
+            "path": "/tmp/stable.log",
+            "stable": True,
+            "platform": "ios",
+            "session_id": "S1",
+            "device_id": "D1",
+        }
+    ]
     assert ("start_sessions", ["D1"], "com.example.app", str(tmp_path)) in backend.calls
     assert ("stop_sessions", ["D1"], False, str(tmp_path)) in backend.calls
+
+
+def test_live_session_views_do_not_claim_stable_artifacts(monkeypatch) -> None:
+    _fake(monkeypatch)
+
+    listed = caps.list_log_sessions({"platform": "ios"})
+
+    assert listed["state"] == "running"
+    assert "artifacts" not in listed
+    assert "evidence_files" not in listed
 
 
 def test_launch_app_maps_explicit_device_and_app(monkeypatch) -> None:
@@ -135,6 +178,8 @@ def test_agent_capability_contract_exposes_scope_and_authorization() -> None:
         assert specs[name].safety == "live_action"
         assert specs[name].requires_authorization is True
         assert "authorized live action" in specs[name].description.lower()
+
+    assert "artifacts/evidence_files" in specs["mobile.sessions.stop"].description
 
     device_schema = specs["mobile.processes.list"].input_schema["properties"]["device"]
     assert "do not invent" in device_schema["description"].lower()
