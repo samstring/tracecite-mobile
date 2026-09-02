@@ -45,6 +45,48 @@ def _backend_and_device(arguments: Mapping[str, Any]):
     return platform, backend, device
 
 
+def _stable_session_artifacts(status: Any) -> tuple[list[dict[str, Any]], list[str]]:
+    """Project stopped session outputs into a small Evidence Runtime handoff.
+
+    Platform backends only return stopped session references after their own
+    bounded collector-exit and file-stability checks have succeeded.  Keep the
+    projection deliberately small: Mobile identifies stable files; Core/MCP own
+    retrieval, provenance, coverage, materialization, replay, and verification.
+    """
+
+    payload = _jsonable(status)
+    if not isinstance(payload, Mapping):
+        return [], []
+
+    artifacts: list[dict[str, Any]] = []
+    evidence_files: list[str] = []
+    for raw in payload.get("sessions") or []:
+        if not isinstance(raw, Mapping):
+            continue
+        state = str(raw.get("state") or payload.get("state") or "").strip().lower()
+        path = str(raw.get("output_path") or "").strip()
+        if state != "stopped" or not path:
+            continue
+
+        artifact: dict[str, Any] = {
+            "kind": "device_log",
+            "path": path,
+            "stable": True,
+            "platform": str(raw.get("platform") or payload.get("platform") or ""),
+            "session_id": str(raw.get("identifier") or raw.get("session_id") or ""),
+        }
+        device = raw.get("device")
+        if isinstance(device, Mapping):
+            device_id = str(device.get("identifier") or "").strip()
+            if device_id:
+                artifact["device_id"] = device_id
+        artifacts.append(artifact)
+        if path not in evidence_files:
+            evidence_files.append(path)
+
+    return artifacts, evidence_files
+
+
 def list_devices(arguments: Dict[str, Any]) -> Dict[str, Any]:
     """List currently connected devices through the selected Mobile backend."""
     platform = _platform(arguments)
@@ -103,12 +145,17 @@ def start_log_session(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def stop_log_session(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    """Stop background log sessions for one explicitly selected device."""
+    """Stop one log session and expose stable evidence paths for Core/MCP."""
     _, backend, device = _backend_and_device(arguments)
     output_dir_raw = arguments.get("output_dir")
     output_dir = Path(str(output_dir_raw)).expanduser() if output_dir_raw else None
     status = backend.stop_sessions(devices=[device], output_dir=output_dir)
-    return _jsonable(status)
+    payload = _jsonable(status)
+    artifacts, evidence_files = _stable_session_artifacts(status)
+    if artifacts:
+        payload["artifacts"] = artifacts
+        payload["evidence_files"] = evidence_files
+    return payload
 
 
 def launch_app(arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -249,7 +296,8 @@ def agent_capabilities() -> tuple[AgentCapability, ...]:
                 kind="action",
                 description=(
                     "Authorized live action: stop background log collection for one explicitly selected device. "
-                    "This mutates collection state only and does not establish evidence sufficiency."
+                    "After the backend confirms stopped files are stable, the result exposes artifacts/evidence_files "
+                    "for handoff to the canonical Evidence Runtime."
                 ),
                 input_schema={
                     "type": "object",
