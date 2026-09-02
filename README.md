@@ -30,13 +30,18 @@ Four things that make mobile debugging harder than it should be:
 ## Install
 
 ```bash
-# Install the main TraceCite distribution, then the Mobile extension
+# Standalone Mobile CLI
 pip install tracecite
 pip install tracecite-mobile
 tracecite-mobile profile init
+
+# Agent/MCP use: install MCP and Mobile in the same Python environment
+pip install tracecite-mcp tracecite-mobile
 ```
 
 iOS needs `idevicesyslog` (libimobiledevice) + Xcode CLT. Android needs `adb` (SDK Platform Tools).
+
+When MCP and Mobile share the same environment, the MCP server discovers Mobile through the `tracecite.extensions` entry point and exposes its AgentCapabilities automatically. An Agent Host does not need to call `register_extension()` for this path.
 
 ## Usage
 
@@ -100,6 +105,16 @@ app health or root cause. Generic evidence retrieval, exact materialization/repl
 aggregation, traversal, verification, provenance, and RetrievalSession novelty belong to
 the main TraceCite Evidence Runtime.
 
+A running session remains a live source. After `mobile.sessions.stop` succeeds and the
+backend has confirmed the collector exited and the output file is stable, the Agent-facing
+result exposes `artifacts` and `evidence_files`. Those paths are the preferred handoff into
+Core/MCP; do not guess file names or scan broad directories.
+
+Through MCP, the current Mobile capabilities are projected as tools such as
+`tracecite_mobile_devices_list` and `tracecite_mobile_sessions_stop`. Capability arguments
+are passed inside the MCP tool's `arguments` object. Host-side environment policy controls
+live-source/live-action authorization; the model does not supply its own authorization flag.
+
 See [Agent integration](docs/agent-integration.md) and the repository skill at
 [`skills/tracecite-mobile/SKILL.md`](skills/tracecite-mobile/SKILL.md).
 
@@ -117,26 +132,27 @@ See [Agent integration](docs/agent-integration.md) and the repository skill at
 ## Architecture
 
 The main TraceCite distribution provides the canonical Evidence Runtime and the
-TraceCite Extension Protocol. TraceCite MCP can project those same evidence semantics
-to MCP Hosts. Mobile stays independent and contributes iOS / Android domain
+TraceCite Extension Protocol. TraceCite MCP is the Agent transport: it exposes the
+canonical Evidence tools and automatically projects AgentCapabilities contributed by
+installed extensions. Mobile stays independent and contributes iOS / Android domain
 capabilities through `tracecite.extensions`:
 
 ```text
 External Agent / Host
         |
-TraceCite Evidence Runtime ---- TraceCite MCP (optional transport)
+    TraceCite MCP
+        |
+TraceCite Evidence Runtime
         |
 tracecite-mobile
         |
 iOS / Android devices
 ```
 
-Importing either `tracecite` or `tracecite_mobile` does not register Mobile
-formats or mutate the Core registry. Use `tracecite extension load` or
-`tracecite run ... --load-extensions --runtime mobile` when the main Runtime
-should discover the installed Mobile extension. The standalone `tracecite-mobile`
-CLI explicitly hosts the same declarative TraceCite Extension contribution
-before dispatching a command.
+Importing either `tracecite` or `tracecite_mobile` does not mutate the Core registry.
+MCP performs extension discovery at server startup when Mobile is installed in the same
+environment. Direct Core CLI users can still load extensions explicitly, and the standalone
+`tracecite-mobile` CLI hosts the same declarative extension before command dispatch.
 
 <img src="architecture.svg" alt="Mobile architecture: Device, Analysis, Knowledge, Plugin layers on Core" width="100%"/>
 
