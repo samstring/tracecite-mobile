@@ -9,20 +9,20 @@ TraceCite Mobile 是 TraceCite Evidence Runtime 的官方 iOS / Android 领域�
 ```text
 Agent Host
    |
-TraceCite Evidence Runtime / MCP transport
+TraceCite MCP transport
    |
-TraceCite Mobile extension
+TraceCite Evidence Runtime + 自动发现的 Mobile extension
    |
 iOS / Android host tools and devices
 ```
 
 TraceCite Core 负责 canonical Evidence API、TraceCite Extension Protocol、RetrievalSession、provenance、coverage、materialize/replay、aggregate、traverse、verify 等通用证据语义。
 
-TraceCite MCP 是这些 canonical 语义之上的可选 Agent transport 投影层。
+TraceCite MCP 把这些 canonical 语义投影给 Agent Host，并把 Core 已注册的 AgentCapability 动态暴露成 MCP tool。
 
-TraceCite Mobile 只负责移动端特有的设备发现、进程/session 事实、经授权的 live action、平台 adapter、采集/过滤流程和移动端 source identity。
+TraceCite Mobile 只负责移动端特有的设备发现、进程/session 事实、经授权的 live action、平台 adapter、采集/过滤流程、移动端 source identity，以及采集停止后的稳定 artifact handoff。
 
-## 2. Declarative Extension
+## 2. Declarative Extension 自动发现
 
 安装后通过 entry point 暴露：
 
@@ -36,23 +36,33 @@ Mobile extension 使用 TraceCite Extension Protocol，贡献：
 - Agent-facing Mobile capabilities；
 - Mobile scenario capability。
 
-单纯 `import tracecite_mobile` 不应修改 Core registry。Host 必须显式加载/注册 extension；独立 `tracecite-mobile` CLI 会在命令分发前显式 host 同一个 extension。
+单纯 `import tracecite_mobile` 不应修改 Core registry。当 `tracecite-mcp` 与 `tracecite-mobile` 安装在同一个 Python 环境时，MCP server 会让 Core 加载已安装的 `tracecite.extensions` entry point，并自动把 Mobile 注册的 AgentCapability 投影成 MCP tool。走这条链路时，Agent Host 不需要自己调用 `register_extension()`。
+
+独立 `tracecite-mobile` CLI 仍会在命令分发前 host 同一个 declarative extension。不是通过 MCP 的 Core CLI 用户仍可以显式加载 extension。
 
 ## 3. Agent-facing capabilities
 
-| Capability | Safety | 需要授权 | 机械语义 |
-| --- | --- | --- | --- |
-| `mobile.environment.probe` | `read` | 否 | 当前 host/backend 工具是否就绪 |
-| `mobile.devices.list` | `live_source` | 否 | 当前 host/platform 这次观察能看到的设备 |
-| `mobile.processes.list` | `live_source` | 否 | 指定设备当前可见进程快照 |
-| `mobile.sessions.list` | `live_source` | 否 | Mobile 后台 session bookkeeping |
-| `mobile.sessions.start` | `live_action` | 是 | 在指定设备启动日志采集 |
-| `mobile.sessions.stop` | `live_action` | 是 | 停止指定设备日志采集 |
-| `mobile.app.launch` | `live_action` | 是 | 在指定设备启动明确 App |
+| Capability | MCP tool | Safety | 需要授权 | 机械语义 |
+| --- | --- | --- | --- | --- |
+| `mobile.environment.probe` | `tracecite_mobile_environment_probe` | `read` | 否 | 当前 host/backend 工具是否就绪 |
+| `mobile.devices.list` | `tracecite_mobile_devices_list` | `live_source` | 否 | 当前 host/platform 这次观察能看到的设备 |
+| `mobile.processes.list` | `tracecite_mobile_processes_list` | `live_source` | 否 | 指定设备当前可见进程快照 |
+| `mobile.sessions.list` | `tracecite_mobile_sessions_list` | `live_source` | 否 | Mobile 后台 session bookkeeping |
+| `mobile.sessions.start` | `tracecite_mobile_sessions_start` | `live_action` | 是 | 在指定设备启动日志采集 |
+| `mobile.sessions.stop` | `tracecite_mobile_sessions_stop` | `live_action` | 是 | 停止指定设备日志采集，并暴露稳定 evidence 文件 |
+| `mobile.app.launch` | `tracecite_mobile_app_launch` | `live_action` | 是 | 在指定设备启动明确 App |
 
 查询结果都是带范围的机械事实。空设备列表、进程未命中、session 不存在，都不能提升成全局不存在结论。action 成功也只表示动作执行结果，不证明 App 健康、根因成立或证据充分。
 
 Host 不得臆造设备 identifier，也不得在多个可能目标之间静默选择第一台。
+
+动态 MCP capability 的真实参数放在 tool 的 `arguments` object 中。授权不是模型可自行传入的字段，MCP Host 通过这些环境变量控制安全权限：
+
+```text
+TRACECITE_MCP_ALLOW_LIVE_SOURCE
+TRACECITE_MCP_ALLOW_LIVE_ACTION
+TRACECITE_MCP_AUTHORIZED_CAPABILITIES
+```
 
 ## 4. Live source 与授权边界
 
@@ -86,7 +96,27 @@ SourceSession 的持久化、reuse、invalidation、coverage 状态仍由 Core R
 
 ## 6. 证据交接
 
-live/hot 日志在进入分析前，先通过现有 seal/archive 流程形成稳定边界。后续复核保留 manifest path、source hash 和 immutable/sealed identity。
+运行中的 Mobile session 仍然属于 live source。`mobile.sessions.start` / `mobile.sessions.list` 虽然可能返回 `output_path`，但不能因为路径已经存在就把它当 immutable evidence。
+
+当 `mobile.sessions.stop` 成功时，backend 已经完成有界 collector 退出确认和文件稳定性检查。Agent-facing 返回会额外暴露一个很小的 handoff：
+
+```json
+{
+  "artifacts": [
+    {
+      "kind": "device_log",
+      "path": "/path/to/stable.log",
+      "stable": true,
+      "platform": "ios",
+      "session_id": "...",
+      "device_id": "..."
+    }
+  ],
+  "evidence_files": ["/path/to/stable.log"]
+}
+```
+
+Agent 应优先使用这些返回路径，不重新猜文件名，也不扫描整个目录。其它持续写入的 live/hot 日志仍然先通过现有 seal/archive 流程形成稳定分析边界。
 
 移动端产物进入 TraceCite Evidence Runtime 后，遵守 canonical Evidence API：
 
@@ -98,6 +128,8 @@ live/hot 日志在进入分析前，先通过现有 seal/archive 流程形成稳
 - `verify`：校验 manifest / integrity。
 
 一次 investigation 使用一个稳定 RetrievalSession。novelty、repeated evidence、coverage、no-match、acquisition-end 都只是机械事实。
+
+如果 Mobile artifact 路径不在 MCP 当前允许的路径边界内，Host 需要把对应根目录加入 `TRACECITE_MCP_ALLOWED_ROOTS`。这个变量是访问授权边界，不是当前 investigation 的 source inventory。
 
 如果 Agent 通过 TraceCite MCP 进入 Evidence Runtime，要继续遵守 MCP transport contract：精确行范围属于 materialize/replay，不要把 range 参数塞进 retrieve target。
 
