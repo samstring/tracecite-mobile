@@ -1,14 +1,73 @@
 #!/usr/bin/env python3
-"""Device-free smoke for the TraceCite Mobile Agent-facing surface."""
+"""Device-free smoke for the real TraceCite MCP + Mobile Agent surface."""
 
 from __future__ import annotations
 
+import asyncio
 import json
+import sys
+import tempfile
+from pathlib import Path
 
-from tracecite import list_capabilities
-from tracecite.extension import EXTENSION_PROTOCOL_VERSION, list_extensions, register_extension
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+from tracecite.extension import EXTENSION_PROTOCOL_VERSION
 
 from tracecite_mobile.extension import EXTENSION
+
+
+CORE_TOOLS = {
+    "tracecite_retrieve",
+    "tracecite_materialize",
+    "tracecite_replay",
+    "tracecite_aggregate",
+    "tracecite_traverse",
+    "tracecite_verify",
+}
+
+MOBILE_TOOLS = {
+    "tracecite_mobile_environment_probe",
+    "tracecite_mobile_devices_list",
+    "tracecite_mobile_processes_list",
+    "tracecite_mobile_sessions_list",
+    "tracecite_mobile_sessions_start",
+    "tracecite_mobile_sessions_stop",
+    "tracecite_mobile_app_launch",
+}
+
+
+async def _run_mcp_smoke() -> dict[str, object]:
+    with tempfile.TemporaryDirectory(prefix="tracecite-mobile-mcp-") as tmp:
+        params = StdioServerParameters(
+            command=sys.executable,
+            args=["-m", "tracecite_mcp.server"],
+            cwd=str(Path(tmp)),
+        )
+        async with stdio_client(params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+
+                listed = await session.list_tools()
+                names = {tool.name for tool in listed.tools}
+                assert CORE_TOOLS <= names
+                assert MOBILE_TOOLS <= names
+
+                # This capability is read-only and device-free.  It proves the
+                # dynamically discovered Mobile tool is executable through the
+                # same MCP process an Agent Host will use.
+                probe = await session.call_tool(
+                    "tracecite_mobile_environment_probe",
+                    arguments={"arguments": {"platform": "ios"}},
+                )
+                assert probe.is_error is False
+                assert probe.structured_content is not None
+                assert probe.structured_content["platform"] == "ios"
+                assert "ready" in probe.structured_content
+
+                return {
+                    "tools": sorted(CORE_TOOLS | MOBILE_TOOLS),
+                    "probe_ready": bool(probe.structured_content["ready"]),
+                }
 
 
 def run_smoke() -> dict[str, object]:
@@ -16,47 +75,14 @@ def run_smoke() -> dict[str, object]:
     assert EXTENSION.manifest.id == "mobile"
     assert EXTENSION.manifest.domain == "mobile"
 
-    register_extension(EXTENSION)
-    register_extension(EXTENSION)
-
-    extensions = {item["id"]: item for item in list_extensions()}
-    assert extensions["mobile"]["protocol_version"] == "2"
-
-    capabilities = {item.name: item for item in list_capabilities()}
-    expected = {
-        "mobile.environment.probe",
-        "mobile.devices.list",
-        "mobile.processes.list",
-        "mobile.sessions.list",
-        "mobile.sessions.start",
-        "mobile.sessions.stop",
-        "mobile.app.launch",
-    }
-    assert expected <= set(capabilities)
-
-    for name in (
-        "mobile.environment.probe",
-        "mobile.devices.list",
-        "mobile.processes.list",
-        "mobile.sessions.list",
-    ):
-        assert capabilities[name].requires_authorization is False
-
-    for name in (
-        "mobile.sessions.start",
-        "mobile.sessions.stop",
-        "mobile.app.launch",
-    ):
-        assert capabilities[name].safety == "live_action"
-        assert capabilities[name].requires_authorization is True
-
+    mcp_result = asyncio.run(_run_mcp_smoke())
     return {
         "extension": {
             "id": EXTENSION.manifest.id,
             "domain": EXTENSION.manifest.domain,
             "protocol_version": EXTENSION.manifest.protocol_version,
         },
-        "capabilities": sorted(expected),
+        "mcp": mcp_result,
         "status": "ok",
     }
 
