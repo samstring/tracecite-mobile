@@ -30,13 +30,18 @@
 ## 安装
 
 ```bash
-# 先安装 TraceCite，再安装 Mobile 扩展
+# 独立 Mobile CLI
 pip install tracecite
 pip install tracecite-mobile
 tracecite-mobile profile init
+
+# Agent / MCP 使用：MCP 和 Mobile 安装在同一个 Python 环境
+pip install tracecite-mcp tracecite-mobile
 ```
 
 iOS 需要 `idevicesyslog`（libimobiledevice）和 Xcode 命令行工具。Android 需要 `adb`（SDK Platform Tools）。
+
+当 MCP 与 Mobile 在同一个环境中时，MCP server 会通过 `tracecite.extensions` entry point 自动发现 Mobile，并把它的 AgentCapability 暴露成 MCP tool；Agent Host 不需要自己调用 `register_extension()`。
 
 ## 怎么用
 
@@ -95,8 +100,14 @@ Mobile 负责：当前 host / platform / device 范围内的机械事实，以�
 因此：设备/进程/session 查询为空，只能说明当前范围内这次观察没有看到；不能直接升级成全局不存在。
 `session start/stop` 或 App launch 成功，也只表示动作成功，不代表 App 健康、根因成立或证据已经充分。
 
+运行中的 session 仍然是 live source。`mobile.sessions.stop` 成功后，Mobile 会在 session 已停止并且输出文件通过有界稳定性检查后返回 `artifacts` 和 `evidence_files`。Agent 应优先用这些路径继续进入 Core/MCP，不重新猜文件名、不扫描大目录。
+
 通用证据检索、精确 materialize/replay、aggregate、traverse、verify、provenance、
 RetrievalSession novelty 等语义统一由 TraceCite Evidence Runtime 负责。
+
+通过 MCP 使用时，当前 capability 会映射成 `tracecite_mobile_devices_list`、
+`tracecite_mobile_sessions_stop` 等 tool；capability 参数放在 MCP tool 的 `arguments`
+object 中。live-source/live-action 权限由 Host 侧环境策略控制，不由模型自行传授权字段。
 
 完整约定见：
 
@@ -118,22 +129,26 @@ RetrievalSession novelty 等语义统一由 TraceCite Evidence Runtime 负责。
 ## 整体架构
 
 TraceCite 主包提供 canonical Evidence Runtime 与 TraceCite Extension Protocol；
-TraceCite MCP 可以把同一套 Evidence 语义投影给 MCP Host。Mobile 保持独立，
-只贡献 iOS / Android 领域能力：
+TraceCite MCP 是 Agent transport：它既暴露 canonical Evidence tools，也会自动把
+已安装 extension 贡献的 AgentCapability 投影成 MCP tools。Mobile 保持独立，只贡献
+iOS / Android 领域能力：
 
 ```text
 External Agent / Host
         |
-TraceCite Evidence Runtime ---- TraceCite MCP（可选 transport）
+    TraceCite MCP
+        |
+TraceCite Evidence Runtime
         |
 tracecite-mobile
         |
 iOS / Android devices
 ```
 
-单纯 `import tracecite` 或 `import tracecite_mobile` 不会自动修改 Core registry。
-需要由 Host 显式加载 extension；独立 `tracecite-mobile` CLI 会在命令分发前显式
-host 同一个 declarative TraceCite Extension 声明。
+单纯 `import tracecite` 或 `import tracecite_mobile` 不会修改 Core registry。
+Mobile 与 MCP 安装在同一环境时，MCP server 启动阶段会自动发现 extension。
+不是通过 MCP 的 Core CLI 用户仍可显式加载 extension；独立 `tracecite-mobile` CLI
+会在命令分发前 host 同一个 declarative extension。
 
 <img src="architecture.svg" alt="Mobile 架构：设备层、分析层、知识层、插件层，底层为 TraceCite Evidence Runtime" width="100%"/>
 
