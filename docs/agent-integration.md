@@ -11,20 +11,20 @@ The integration has three layers:
 ```text
 Agent Host
    |
-TraceCite Evidence Runtime / MCP transport
+TraceCite MCP transport
    |
-TraceCite Mobile extension
+TraceCite Evidence Runtime + discovered Mobile extension
    |
 iOS / Android host tools and devices
 ```
 
 TraceCite Core owns the canonical Evidence API, TraceCite Extension Protocol, RetrievalSession mechanics, provenance, coverage, materialization/replay, aggregation, traversal, and verification.
 
-TraceCite MCP is an optional transport projection over those canonical semantics.
+TraceCite MCP projects those canonical semantics to Agent Hosts and dynamically exposes installed Core-registered AgentCapabilities as MCP tools.
 
-TraceCite Mobile owns mobile-specific device discovery, process/session facts, authorized live actions, platform adapters, capture/filter workflows, and mobile source identity.
+TraceCite Mobile owns mobile-specific device discovery, process/session facts, authorized live actions, platform adapters, capture/filter workflows, mobile source identity, and stable artifact handoff after collection stops.
 
-## 2. Declarative extension surface
+## 2. Declarative extension discovery
 
 The installed package exposes:
 
@@ -38,23 +38,33 @@ The extension manifest uses the TraceCite Extension Protocol and contributes:
 - Agent-facing mobile capabilities;
 - the Mobile scenario capability.
 
-Importing `tracecite_mobile` alone must not mutate Core registries. A Host explicitly loads/registers the extension, or the standalone `tracecite-mobile` CLI hosts it before command dispatch.
+Importing `tracecite_mobile` alone must not mutate Core registries. When `tracecite-mcp` and `tracecite-mobile` are installed in the same Python environment, the MCP server asks Core to load installed `tracecite.extensions` entry points and automatically projects the registered Mobile AgentCapabilities into MCP tools. An Agent Host should not need to call `register_extension()` itself for this path.
+
+The standalone `tracecite-mobile` CLI still hosts the same declarative extension before command dispatch. Direct Core CLI users may explicitly load extensions when they are not using MCP.
 
 ## 3. Agent-facing capabilities
 
-| Capability | Safety | Authorization | Mechanical meaning |
-| --- | --- | --- | --- |
-| `mobile.environment.probe` | `read` | no | host/backend tool readiness |
-| `mobile.devices.list` | `live_source` | no | devices visible in the current host/platform observation |
-| `mobile.processes.list` | `live_source` | no | process snapshot on one explicit device |
-| `mobile.sessions.list` | `live_source` | no | Mobile background-session bookkeeping |
-| `mobile.sessions.start` | `live_action` | yes | start log collection on one explicit device |
-| `mobile.sessions.stop` | `live_action` | yes | stop log collection on one explicit device |
-| `mobile.app.launch` | `live_action` | yes | launch one explicit app on one explicit device |
+| Capability | MCP tool | Safety | Authorization | Mechanical meaning |
+| --- | --- | --- | --- | --- |
+| `mobile.environment.probe` | `tracecite_mobile_environment_probe` | `read` | no | host/backend tool readiness |
+| `mobile.devices.list` | `tracecite_mobile_devices_list` | `live_source` | no | devices visible in the current host/platform observation |
+| `mobile.processes.list` | `tracecite_mobile_processes_list` | `live_source` | no | process snapshot on one explicit device |
+| `mobile.sessions.list` | `tracecite_mobile_sessions_list` | `live_source` | no | Mobile background-session bookkeeping |
+| `mobile.sessions.start` | `tracecite_mobile_sessions_start` | `live_action` | yes | start log collection on one explicit device |
+| `mobile.sessions.stop` | `tracecite_mobile_sessions_stop` | `live_action` | yes | stop log collection and expose stable evidence files |
+| `mobile.app.launch` | `tracecite_mobile_app_launch` | `live_action` | yes | launch one explicit app on one explicit device |
 
 Query results are scoped observations. Empty device/process/session output is not proof of global absence. Action success reports an action result only; it does not prove app health, root cause, or evidence sufficiency.
 
 A Host must not invent unresolved device identifiers or silently choose among multiple possible targets.
+
+For dynamically projected MCP tools, capability parameters are passed inside the tool's `arguments` object. Authorization is not a model-supplied field. The MCP Host controls safety grants with:
+
+```text
+TRACECITE_MCP_ALLOW_LIVE_SOURCE
+TRACECITE_MCP_ALLOW_LIVE_ACTION
+TRACECITE_MCP_AUTHORIZED_CAPABILITIES
+```
 
 ## 4. Live-source and authorization boundary
 
@@ -83,7 +93,27 @@ Core Runtime remains the owner of SourceSession persistence, reuse decisions, in
 
 ## 6. Evidence handoff
 
-Live/hot logs must first obtain a stable analysis boundary through the existing seal/archive workflow. Preserve manifest paths, source hashes, and immutable/sealed identity for later review.
+A running Mobile session is still a live source. `mobile.sessions.start` and `mobile.sessions.list` may expose an `output_path`, but that path must not be treated as immutable evidence merely because it exists.
+
+When `mobile.sessions.stop` succeeds, the backend has already completed its bounded collector-exit and file-stability checks. The Agent-facing result then exposes a small handoff:
+
+```json
+{
+  "artifacts": [
+    {
+      "kind": "device_log",
+      "path": "/path/to/stable.log",
+      "stable": true,
+      "platform": "ios",
+      "session_id": "...",
+      "device_id": "..."
+    }
+  ],
+  "evidence_files": ["/path/to/stable.log"]
+}
+```
+
+Use those returned paths instead of guessing file names or scanning directories. Other live/hot logs still need the existing seal/archive workflow before being treated as stable analysis inputs.
 
 Once a mobile artifact enters the TraceCite Evidence Runtime, use the canonical Evidence API semantics:
 
@@ -95,6 +125,8 @@ Once a mobile artifact enters the TraceCite Evidence Runtime, use the canonical 
 - `verify` for integrity/manifest checks.
 
 Use one stable RetrievalSession for one investigation. Novelty, repeated evidence, coverage, no-match, and acquisition-end fields are mechanical facts only.
+
+If the artifact path is outside the MCP process's current path boundary, the Host must add the appropriate root to `TRACECITE_MCP_ALLOWED_ROOTS`. That variable is an authorization boundary, not a source inventory.
 
 If an Agent reaches the Evidence Runtime through TraceCite MCP, follow the MCP transport contract. In particular, exact line ranges belong to materialize/replay rather than range-shaped retrieve arguments.
 
