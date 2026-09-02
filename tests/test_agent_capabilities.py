@@ -16,6 +16,7 @@ from tracecite_mobile.platforms.models import (
 @dataclass
 class FakeBackend:
     platform: str = "ios"
+    stable_path: Path = Path("/tmp/tracecite-mobile-stable.log")
 
     def __post_init__(self):
         self.device = DeviceRef("ios", "D1", "Phone")
@@ -65,7 +66,7 @@ class FakeBackend:
                     "ios",
                     "S1",
                     device=self.device,
-                    output_path=Path("/tmp/stable.log"),
+                    output_path=self.stable_path,
                     state="stopped",
                 ),
             ),
@@ -76,8 +77,8 @@ class FakeBackend:
         return ProcessRef("ios", "P2", device=device, name="Launched", package=app, pid=99)
 
 
-def _fake(monkeypatch):
-    backend = FakeBackend()
+def _fake(monkeypatch, *, stable_path: Path | None = None):
+    backend = FakeBackend(stable_path=stable_path or Path("/tmp/tracecite-mobile-stable.log"))
     monkeypatch.setattr(caps, "get_backend", lambda platform: backend)
     return backend
 
@@ -96,7 +97,9 @@ def test_environment_and_process_queries_map_to_backend(monkeypatch) -> None:
 
 
 def test_session_actions_require_explicit_device_in_executor(monkeypatch, tmp_path) -> None:
-    backend = _fake(monkeypatch)
+    stable_path = tmp_path / "stable.log"
+    stable_path.write_text("stable evidence\n", encoding="utf-8")
+    backend = _fake(monkeypatch, stable_path=stable_path)
 
     started = caps.start_log_session({
         "platform": "ios",
@@ -113,11 +116,11 @@ def test_session_actions_require_explicit_device_in_executor(monkeypatch, tmp_pa
     assert started["state"] == "running"
     assert "artifacts" not in started
     assert stopped["state"] == "stopped"
-    assert stopped["evidence_files"] == ["/tmp/stable.log"]
+    assert stopped["evidence_files"] == [str(stable_path)]
     assert stopped["artifacts"] == [
         {
             "kind": "device_log",
-            "path": "/tmp/stable.log",
+            "path": str(stable_path),
             "stable": True,
             "platform": "ios",
             "session_id": "S1",
@@ -126,6 +129,21 @@ def test_session_actions_require_explicit_device_in_executor(monkeypatch, tmp_pa
     ]
     assert ("start_sessions", ["D1"], "com.example.app", str(tmp_path)) in backend.calls
     assert ("stop_sessions", ["D1"], False, str(tmp_path)) in backend.calls
+
+
+def test_stopped_missing_file_is_not_advertised_as_stable(monkeypatch, tmp_path) -> None:
+    missing = tmp_path / "missing.log"
+    _fake(monkeypatch, stable_path=missing)
+
+    stopped = caps.stop_log_session({
+        "platform": "ios",
+        "device": "D1",
+        "output_dir": str(tmp_path),
+    })
+
+    assert stopped["state"] == "stopped"
+    assert "artifacts" not in stopped
+    assert "evidence_files" not in stopped
 
 
 def test_live_session_views_do_not_claim_stable_artifacts(monkeypatch) -> None:
