@@ -8,12 +8,17 @@ from __future__ import annotations
 
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
+import time
 from typing import Any, Dict, Mapping
 
 from tracecite.extension import AgentCapability
 from tracecite.runtime import CapabilitySpec
 
 from .device_api import get_backend
+
+
+_ARTIFACT_STABILITY_POLL_SEC = 0.05
+_ARTIFACT_STABILITY_CHECKS = 2
 
 
 def _jsonable(value: Any) -> Any:
@@ -45,13 +50,38 @@ def _backend_and_device(arguments: Mapping[str, Any]):
     return platform, backend, device
 
 
-def _stable_session_artifacts(status: Any) -> tuple[list[dict[str, Any]], list[str]]:
-    """Project stopped session outputs into a small Evidence Runtime handoff.
+def _path_is_stable(path: Path) -> bool:
+    """Confirm a stopped artifact is a regular file with stable size/mtime."""
 
-    Platform backends only return stopped session references after their own
-    bounded collector-exit and file-stability checks have succeeded.  Keep the
-    projection deliberately small: Mobile identifies stable files; Core/MCP own
-    retrieval, provenance, coverage, materialization, replay, and verification.
+    previous: tuple[int, int] | None = None
+    stable = 0
+    for index in range(_ARTIFACT_STABILITY_CHECKS + 1):
+        try:
+            stat = path.stat()
+            if not path.is_file():
+                return False
+            current = (int(stat.st_size), int(stat.st_mtime_ns))
+        except OSError:
+            return False
+        if current == previous:
+            stable += 1
+        else:
+            previous = current
+            stable = 1
+        if stable >= _ARTIFACT_STABILITY_CHECKS:
+            return True
+        if index < _ARTIFACT_STABILITY_CHECKS:
+            time.sleep(_ARTIFACT_STABILITY_POLL_SEC)
+    return False
+
+
+def _stable_session_artifacts(status: Any) -> tuple[list[dict[str, Any]], list[str]]:
+    """Project verified stopped session outputs into an Evidence Runtime handoff.
+
+    The platform backend must report the session stopped, and this adapter also
+    performs a bounded size/mtime stability check before it marks a path stable.
+    Mobile only identifies stable files; Core/MCP own retrieval, provenance,
+    coverage, materialization, replay, and verification.
     """
 
     payload = _jsonable(status)
@@ -65,7 +95,7 @@ def _stable_session_artifacts(status: Any) -> tuple[list[dict[str, Any]], list[s
             continue
         state = str(raw.get("state") or payload.get("state") or "").strip().lower()
         path = str(raw.get("output_path") or "").strip()
-        if state != "stopped" or not path:
+        if state != "stopped" or not path or not _path_is_stable(Path(path)):
             continue
 
         artifact: dict[str, Any] = {
@@ -145,7 +175,7 @@ def start_log_session(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def stop_log_session(arguments: Dict[str, Any]) -> Dict[str, Any]:
-    """Stop one log session and expose stable evidence paths for Core/MCP."""
+    """Stop one log session and expose verified stable evidence paths."""
     _, backend, device = _backend_and_device(arguments)
     output_dir_raw = arguments.get("output_dir")
     output_dir = Path(str(output_dir_raw)).expanduser() if output_dir_raw else None
@@ -296,8 +326,8 @@ def agent_capabilities() -> tuple[AgentCapability, ...]:
                 kind="action",
                 description=(
                     "Authorized live action: stop background log collection for one explicitly selected device. "
-                    "After the backend confirms stopped files are stable, the result exposes artifacts/evidence_files "
-                    "for handoff to the canonical Evidence Runtime."
+                    "After the session reports stopped and the output file passes a bounded stability check, the result "
+                    "exposes artifacts/evidence_files for handoff to the canonical Evidence Runtime."
                 ),
                 input_schema={
                     "type": "object",
