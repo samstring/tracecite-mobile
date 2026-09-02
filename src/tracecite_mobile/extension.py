@@ -11,6 +11,7 @@ from tracecite.extension import (
 from . import __version__
 from .analysis.scenario_runtime import MOBILE_SCENARIO
 from .capabilities import agent_capabilities
+from .device_capabilities import agent_device_capabilities
 from .plugins import register_all
 
 
@@ -24,6 +25,7 @@ EXTENSION = TraceCiteExtension(
     capabilities=(
         CorePluginCapability(name="mobile.core", register=register_all),
         *agent_capabilities(),
+        *agent_device_capabilities(),
         MOBILE_SCENARIO,
     ),
 )
