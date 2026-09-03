@@ -14,6 +14,7 @@ from typing import Any, Dict, Mapping
 from tracecite.extension import AgentCapability
 from tracecite.runtime import CapabilitySpec
 
+from .device.archive import request_seal_hot
 from .device_api import get_backend
 
 
@@ -117,6 +118,41 @@ def _stable_session_artifacts(status: Any) -> tuple[list[dict[str, Any]], list[s
     return artifacts, evidence_files
 
 
+def _project_cut_support(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Expose whether each live session can be cut without stopping collection."""
+
+    supports_any = False
+    sessions = payload.get("sessions") or []
+    if isinstance(sessions, list):
+        for raw in sessions:
+            if not isinstance(raw, dict):
+                continue
+            state = str(raw.get("state") or payload.get("state") or "").strip().lower()
+            supported = state in {"running", "active"} and bool(str(raw.get("output_path") or "").strip())
+            raw["supports_cut"] = supported
+            supports_any = supports_any or supported
+    payload["supports_cut"] = supports_any
+    return payload
+
+
+def _running_session_for_device(status: Any, device_id: str) -> Mapping[str, Any]:
+    payload = _jsonable(status)
+    if not isinstance(payload, Mapping):
+        raise ValueError("当前 session 状态不可用")
+    for raw in payload.get("sessions") or []:
+        if not isinstance(raw, Mapping):
+            continue
+        state = str(raw.get("state") or payload.get("state") or "").strip().lower()
+        device = raw.get("device")
+        seen_device = ""
+        if isinstance(device, Mapping):
+            seen_device = str(device.get("identifier") or "").strip()
+        path = str(raw.get("output_path") or "").strip()
+        if state in {"running", "active"} and seen_device == device_id and path:
+            return raw
+    raise ValueError(f"设备 {device_id} 当前没有可切段的运行中日志 session")
+
+
 def list_devices(arguments: Dict[str, Any]) -> Dict[str, Any]:
     """List currently connected devices through the selected Mobile backend."""
     platform = _platform(arguments)
@@ -158,7 +194,8 @@ def list_log_sessions(arguments: Dict[str, Any]) -> Dict[str, Any]:
     output_dir = Path(str(output_dir_raw)).expanduser() if output_dir_raw else None
     backend = get_backend(platform)
     status = backend.list_sessions(output_dir=output_dir)
-    return _jsonable(status)
+    payload = _jsonable(status)
+    return _project_cut_support(payload)
 
 
 def start_log_session(arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -172,6 +209,57 @@ def start_log_session(arguments: Dict[str, Any]) -> Dict[str, Any]:
         output_dir=output_dir,
     )
     return _jsonable(status)
+
+
+def cut_log_session(arguments: Dict[str, Any]) -> Dict[str, Any]:
+    """Seal the current live segment into stable evidence while collection continues."""
+
+    platform, backend, device = _backend_and_device(arguments)
+    output_dir_raw = arguments.get("output_dir")
+    output_dir = Path(str(output_dir_raw)).expanduser() if output_dir_raw else None
+    before = backend.list_sessions(devices=[device], output_dir=output_dir)
+    session = _running_session_for_device(before, str(device.identifier))
+    hot_path = Path(str(session.get("output_path"))).expanduser()
+    session_id = str(session.get("identifier") or session.get("session_id") or "")
+
+    sealed = request_seal_hot(
+        hot_path,
+        device_name=str(device.name or device.identifier),
+    )
+    sealed_payload = sealed.to_dict()
+    sealed_path = str(sealed_payload.get("sealed_path") or "")
+
+    after = backend.list_sessions(devices=[device], output_dir=output_dir)
+    after_payload = _project_cut_support(_jsonable(after))
+    collection_continues = False
+    for raw in after_payload.get("sessions") or []:
+        if not isinstance(raw, Mapping):
+            continue
+        raw_id = str(raw.get("identifier") or raw.get("session_id") or "")
+        state = str(raw.get("state") or after_payload.get("state") or "").strip().lower()
+        if raw_id == session_id and state in {"running", "active"}:
+            collection_continues = True
+            break
+
+    artifact = {
+        "kind": "device_log",
+        "path": sealed_path,
+        "stable": True,
+        "sealed": True,
+        "platform": platform,
+        "session_id": session_id,
+        "device_id": str(device.identifier),
+    }
+    return {
+        "platform": platform,
+        "device": _jsonable(device),
+        "session_id": session_id,
+        "state": str(after_payload.get("state") or "running"),
+        "collection_continues": collection_continues,
+        "sealed": sealed_payload,
+        "artifacts": [artifact],
+        "evidence_files": [sealed_path],
+    }
 
 
 def stop_log_session(arguments: Dict[str, Any]) -> Dict[str, Any]:
@@ -281,7 +369,8 @@ def agent_capabilities() -> tuple[AgentCapability, ...]:
                 kind="query",
                 description=(
                     "List Mobile background log-session bookkeeping for the selected platform. "
-                    "Session state is a mechanical fact and does not imply evidence sufficiency."
+                    "Running sessions with a writable output path report supports_cut=true so stable evidence can be "
+                    "sealed without stopping collection. Session state is mechanical and does not imply evidence sufficiency."
                 ),
                 input_schema={
                     "type": "object",
@@ -319,6 +408,30 @@ def agent_capabilities() -> tuple[AgentCapability, ...]:
                 requires_authorization=True,
             ),
             start_log_session,
+        ),
+        (
+            CapabilitySpec(
+                name="mobile.sessions.cut",
+                kind="action",
+                description=(
+                    "Authorized live action: seal the current log segment for one explicitly selected running device "
+                    "session into stable artifacts/evidence_files while the collection session continues. "
+                    "Use this when analyzable evidence is needed without stopping ongoing collection."
+                ),
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "platform": _PLATFORM_SCHEMA,
+                        "device": _DEVICE_SCHEMA,
+                        "output_dir": {"type": "string"},
+                    },
+                    "required": ["device"],
+                    "additionalProperties": False,
+                },
+                safety="live_action",
+                requires_authorization=True,
+            ),
+            cut_log_session,
         ),
         (
             CapabilitySpec(
@@ -373,6 +486,7 @@ def agent_capabilities() -> tuple[AgentCapability, ...]:
 
 __all__ = [
     "agent_capabilities",
+    "cut_log_session",
     "launch_app",
     "list_devices",
     "list_log_sessions",
