@@ -30,7 +30,7 @@ TraceCite Mobile 负责：
 
 1. **不要臆造目标。** 设备必须使用 `mobile.devices.list` 返回的稳定 identifier；目标不唯一时先解析或让用户选择，不自动猜第一台。
 2. **查询结果只是当前范围的机械事实。** 设备列表为空、进程未命中、session 不存在，都只能说明当前 host / platform / device 的这次观察，没有资格直接推出“设备不存在”“App 没运行过”或“问题不存在”。
-3. **live action 必须显式授权。** `mobile.sessions.start`、`mobile.sessions.cut`、`mobile.sessions.stop`、`mobile.app.launch/stop`、performance start/stop 等会改变真实设备或采集状态，不要为了“方便排查”隐式执行。
+3. **live action 需要 Host 授权，但普通用户不应逐 capability 配置。** 推荐一次性授权整个 Mobile action 域：`TRACECITE_MCP_GRANTS=mobile:actions`。这允许当前及以后注册的 `mobile.*` live action；Agent 仍不能通过模型参数给自己授权。
 4. **动作成功不等于系统健康。** launch 成功、session running、cut/stop 成功只描述动作结果，不证明 App 健康、根因成立或证据充分。
 5. **需要稳定证据时优先 cut，不要为了分析而 stop。** Running session 的 `output_path` 仍可能在写入。若 `mobile.sessions.list` 返回 `supports_cut=true`，使用 `mobile.sessions.cut` 把当前段 seal 成 `stable=true` 的 artifact，同时保持 `collection_continues=true`。只有用户确实要结束采集时才使用 `mobile.sessions.stop`。
 6. **Mobile artifact 默认交给 Core 调查。** 大型、持续写入、多 source 的 device log / trace / crash / diagnostic artifact 应继续走 TraceCite `retrieve` / `materialize` / `aggregate` / `traverse` 等 canonical Evidence Runtime，不要抓回来以后又用宽泛 `cat`、`grep` 或整文件读取绕过 Core。小而天然有界的辅助文件可以直接 read。
@@ -54,15 +54,21 @@ mobile.sessions.stop     -> tracecite_mobile_sessions_stop
 mobile.app.launch        -> tracecite_mobile_app_launch
 ```
 
-动态 capability 的实际参数放在 MCP tool 的 `arguments` object 中。不要把授权伪装成模型参数；Host 侧安全开关由 MCP 进程控制：
+普通用户推荐只配一个 Host grant：
 
 ```text
-TRACECITE_MCP_ALLOW_LIVE_SOURCE
-TRACECITE_MCP_ALLOW_LIVE_ACTION
-TRACECITE_MCP_AUTHORIZED_CAPABILITIES
+TRACECITE_MCP_GRANTS=mobile:actions
 ```
 
-`requires_authorization=True` 的 capability 只有 Host 明确授权后才允许执行。Agent 不应尝试传 `authorized=true` 绕过该边界。
+`mobile:actions` 同时允许 Mobile 的 live-source observation 和已注册 live actions，因此新增 `mobile.*` action 后不需要再次维护授权名单。如果只想允许观察而不允许真实设备动作，可使用：
+
+```text
+TRACECITE_MCP_GRANTS=mobile:observe
+```
+
+高级/企业环境仍可用 `TRACECITE_MCP_AUTHORIZED_CAPABILITIES` 做显式 capability allowlist，并用 `TRACECITE_MCP_DENIED_CAPABILITIES` 对某个 action 做最终 deny；deny 优先级最高。旧的 `TRACECITE_MCP_ALLOW_LIVE_SOURCE` / `TRACECITE_MCP_ALLOW_LIVE_ACTION` 继续兼容，但不再是 Mobile 普通使用路径。
+
+动态 capability 的实际参数放在 MCP tool 的 `arguments` object 中。Agent 不应尝试传 `authorized=true` 绕过 Host 边界。
 
 如果 Mobile 稳定产物位于 MCP 当前允许目录之外，Host 还需要把对应根目录加入 `TRACECITE_MCP_ALLOWED_ROOTS`。权限根目录只是访问边界，不等于当前 investigation 的证据清单。
 
