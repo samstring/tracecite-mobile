@@ -54,13 +54,35 @@ def test_declarative_extension_is_complete_and_idempotent() -> None:
         register_extension(EXTENSION)
         register_extension(EXTENSION)
 
-        expected = {
+        expected_segmenters = {
             "android", "applog", "devicelog", "ios", "mixed", "online",
             "syslog", "threadtime",
         }
-        assert expected <= set(available_segmenters())
+        assert expected_segmenters <= set(available_segmenters())
         assert get_runtime("mobile") is not None
         capabilities = {item.name: item for item in list_capabilities()}
+
+        expected_agent_capabilities = {
+            "mobile.environment.probe",
+            "mobile.devices.list",
+            "mobile.processes.list",
+            "mobile.sessions.list",
+            "mobile.sessions.start",
+            "mobile.sessions.cut",
+            "mobile.sessions.stop",
+            "mobile.app.launch",
+            "mobile.app.stop",
+            "mobile.archive.list",
+            "mobile.archive.fetch",
+            "mobile.performance.profiles",
+            "mobile.performance.start",
+            "mobile.performance.status",
+            "mobile.performance.stop",
+            "mobile.diagnostics.run",
+            "mobile.crashes.list",
+            "mobile.crashes.fetch",
+        }
+        assert expected_agent_capabilities <= set(capabilities)
 
         assert capabilities["mobile.environment.probe"].safety == "read"
         assert capabilities["mobile.devices.list"].safety == "live_source"
@@ -69,8 +91,12 @@ def test_declarative_extension_is_complete_and_idempotent() -> None:
 
         for name in (
             "mobile.sessions.start",
+            "mobile.sessions.cut",
             "mobile.sessions.stop",
             "mobile.app.launch",
+            "mobile.app.stop",
+            "mobile.performance.start",
+            "mobile.performance.stop",
         ):
             assert capabilities[name].safety == "live_action"
             assert capabilities[name].requires_authorization is True
