@@ -4,6 +4,8 @@
 
 TraceCite Mobile is the official iOS/Android domain extension for the TraceCite Evidence Runtime. It exposes device/session capabilities and produces reviewable mobile evidence. It does not choose hypotheses, infer root cause, decide evidence sufficiency, or decide when an Agent should stop.
 
+Using a Mobile Agent capability means the task is using a TraceCite extension, so the normal TraceCite investigation mode applies. Mobile extends the Core workflow; it does not create a separate investigation path.
+
 ## 1. Runtime boundary
 
 The integration has three layers:
@@ -22,7 +24,18 @@ TraceCite Core owns the canonical Evidence API, TraceCite Extension Protocol, Re
 
 TraceCite MCP projects those canonical semantics to Agent Hosts and dynamically exposes installed Core-registered AgentCapabilities as MCP tools.
 
-TraceCite Mobile owns mobile-specific device discovery, process/session facts, authorized live actions, platform adapters, capture/filter workflows, mobile source identity, and stable artifact handoff after collection stops.
+TraceCite Mobile owns mobile-specific device discovery, process/session facts, authorized live actions, platform adapters, performance/diagnostic/crash acquisition, mobile source identity, and stable artifact handoff.
+
+The intended flow is:
+
+```text
+Mobile acquisition/action
+        -> stable Mobile artifact
+        -> Core retrieve/materialize/aggregate/traverse/verify
+        -> Agent causal reasoning and conclusion
+```
+
+For large, live, or multi-source diagnostic artifacts, do not acquire through Mobile and then bypass the Evidence Runtime with a broad native `cat`, `grep`, or full-file read. Small already-bounded helper files may still be read directly when simpler.
 
 ## 2. Declarative extension discovery
 
@@ -40,19 +53,30 @@ The extension manifest uses the TraceCite Extension Protocol and contributes:
 
 Importing `tracecite_mobile` alone must not mutate Core registries. When `tracecite-mcp` and `tracecite-mobile` are installed in the same Python environment, the MCP server asks Core to load installed `tracecite.extensions` entry points and automatically projects the registered Mobile AgentCapabilities into MCP tools. An Agent Host should not need to call `register_extension()` itself for this path.
 
+This is the capability-discovery contract: adding a new Mobile Agent-facing feature requires registering one `AgentCapability`; MCP then discovers and projects it automatically. MCP must not maintain a second Mobile-specific capability list.
+
 The standalone `tracecite-mobile` CLI still hosts the same declarative extension before command dispatch. Direct Core CLI users may explicitly load extensions when they are not using MCP.
 
 ## 3. Agent-facing capabilities
 
-| Capability | MCP tool | Safety | Authorization | Mechanical meaning |
-| --- | --- | --- | --- | --- |
-| `mobile.environment.probe` | `tracecite_mobile_environment_probe` | `read` | no | host/backend tool readiness |
-| `mobile.devices.list` | `tracecite_mobile_devices_list` | `live_source` | no | devices visible in the current host/platform observation |
-| `mobile.processes.list` | `tracecite_mobile_processes_list` | `live_source` | no | process snapshot on one explicit device |
-| `mobile.sessions.list` | `tracecite_mobile_sessions_list` | `live_source` | no | Mobile background-session bookkeeping |
-| `mobile.sessions.start` | `tracecite_mobile_sessions_start` | `live_action` | yes | start log collection on one explicit device |
-| `mobile.sessions.stop` | `tracecite_mobile_sessions_stop` | `live_action` | yes | stop log collection and expose stable evidence files |
-| `mobile.app.launch` | `tracecite_mobile_app_launch` | `live_action` | yes | launch one explicit app on one explicit device |
+| Capability | Safety | Authorization | Mechanical meaning |
+| --- | --- | --- | --- |
+| `mobile.environment.probe` | `read` | no | host/backend tool readiness |
+| `mobile.devices.list` | `live_source` | no | devices visible in the current host/platform observation |
+| `mobile.processes.list` | `live_source` | no | process snapshot on one explicit device |
+| `mobile.sessions.list` | `live_source` | no | background-session bookkeeping; running sessions report `supports_cut` when available |
+| `mobile.sessions.start` | `live_action` | yes | start log collection on one explicit device |
+| `mobile.sessions.cut` | `live_action` | yes | seal the current live segment into stable evidence while collection continues |
+| `mobile.sessions.stop` | `live_action` | yes | end log collection and expose final stable evidence files |
+| `mobile.app.launch` / `mobile.app.stop` | `live_action` | yes | launch/stop one explicitly selected app/process |
+| `mobile.archive.list` / `mobile.archive.fetch` | `live_source` | no | inspect archive segments or materialize one caller-selected time window |
+| `mobile.performance.profiles` | `read` | no | list backend-declared performance profiles |
+| `mobile.performance.start` / `mobile.performance.stop` | `live_action` | yes | start/stop caller-selected performance collection |
+| `mobile.performance.status` | `live_source` | no | report current performance collection state |
+| `mobile.diagnostics.run` | `live_source` | no | acquire one backend-declared diagnostic |
+| `mobile.crashes.list` / `mobile.crashes.fetch` | `live_source` | no | enumerate/fetch caller-selected crash-like evidence |
+
+MCP tool names are deterministic projections such as `mobile.sessions.cut -> tracecite_mobile_sessions_cut`.
 
 Query results are scoped observations. Empty device/process/session output is not proof of global absence. Action success reports an action result only; it does not prove app health, root cause, or evidence sufficiency.
 
@@ -66,11 +90,17 @@ TRACECITE_MCP_ALLOW_LIVE_ACTION
 TRACECITE_MCP_AUTHORIZED_CAPABILITIES
 ```
 
+A typical log-session authorization set is:
+
+```text
+mobile.sessions.start,mobile.sessions.cut,mobile.sessions.stop
+```
+
 ## 4. Live-source and authorization boundary
 
 Mobile live actions may alter a real device or collection process. Keep them visible as `live_action` capabilities with `requires_authorization=True`.
 
-Do not hide a live action inside a query/read capability. Starting or stopping collection and launching an app must remain explicit operations.
+Do not hide a live action inside a query/read capability. Starting, cutting, or stopping collection and launching/stopping an app must remain explicit operations.
 
 The Agent remains responsible for deciding whether the action is necessary for the task.
 
@@ -91,29 +121,34 @@ Growing log content is deliberately not part of source identity. Appending lines
 
 Core Runtime remains the owner of SourceSession persistence, reuse decisions, invalidation, and coverage state.
 
-## 6. Evidence handoff
+## 6. Live cut and evidence handoff
 
 A running Mobile session is still a live source. `mobile.sessions.start` and `mobile.sessions.list` may expose an `output_path`, but that path must not be treated as immutable evidence merely because it exists.
 
-When `mobile.sessions.stop` succeeds, the backend has already completed its bounded collector-exit and file-stability checks. The Agent-facing result then exposes a small handoff:
+When stable evidence is needed while collection should continue, prefer `mobile.sessions.cut`. The capability uses Mobile's existing cooperative seal/live-cut implementation, returns the sealed segment as stable evidence, and then verifies the same session is still running. A normal result is shaped like:
 
 ```json
 {
+  "state": "running",
+  "collection_continues": true,
   "artifacts": [
     {
       "kind": "device_log",
-      "path": "/path/to/stable.log",
+      "path": "/path/to/sealed-segment.log",
       "stable": true,
+      "sealed": true,
       "platform": "ios",
       "session_id": "...",
       "device_id": "..."
     }
   ],
-  "evidence_files": ["/path/to/stable.log"]
+  "evidence_files": ["/path/to/sealed-segment.log"]
 }
 ```
 
-Use those returned paths instead of guessing file names or scanning directories. Other live/hot logs still need the existing seal/archive workflow before being treated as stable analysis inputs.
+Do not stop collection merely to obtain analyzable evidence. Use `mobile.sessions.stop` only when collection should actually end. After stop, the final stable session output is exposed through the same `artifacts` / `evidence_files` handoff convention.
+
+Use returned paths instead of guessing file names or scanning directories. Other acquisition capabilities that return stable artifact paths should follow the same handoff principle.
 
 Once a mobile artifact enters the TraceCite Evidence Runtime, use the canonical Evidence API semantics:
 
@@ -138,6 +173,7 @@ Keep these distinctions explicit:
 empty device list        != no device exists anywhere
 missing process snapshot != app never ran
 session running          != enough evidence was collected
+cut succeeded            != root cause is established
 launch succeeded         != app is healthy
 filter zero-match        != incident did not occur
 new_evidence = 0         != investigation complete

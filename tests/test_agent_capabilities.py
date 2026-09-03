@@ -17,6 +17,7 @@ from tracecite_mobile.platforms.models import (
 class FakeBackend:
     platform: str = "ios"
     stable_path: Path = Path("/tmp/tracecite-mobile-stable.log")
+    live_path: Path = Path("/tmp/live.log")
 
     def __post_init__(self):
         self.device = DeviceRef("ios", "D1", "Phone")
@@ -41,11 +42,11 @@ class FakeBackend:
         return [ProcessRef("ios", "P1", device=device, name="App", package=package, pid=42)]
 
     def list_sessions(self, *, devices=None, output_dir=None, **kwargs):
-        self.calls.append(("list_sessions", str(output_dir) if output_dir else None))
+        self.calls.append(("list_sessions", [item.identifier for item in devices or []], str(output_dir) if output_dir else None))
         return SessionStatus(
             "ios",
             state="running",
-            sessions=(SessionRef("ios", "S1", device=self.device, output_path=Path("/tmp/live.log")),),
+            sessions=(SessionRef("ios", "S1", device=self.device, output_path=self.live_path),),
         )
 
     def start_sessions(self, devices, *, package="", output_dir=None, **kwargs):
@@ -53,7 +54,7 @@ class FakeBackend:
         return SessionStatus(
             "ios",
             state="running",
-            sessions=(SessionRef("ios", "S1", device=self.device, output_path=Path("/tmp/live.log")),),
+            sessions=(SessionRef("ios", "S1", device=self.device, output_path=self.live_path),),
         )
 
     def stop_sessions(self, *, devices=None, all_devices=False, output_dir=None, **kwargs):
@@ -77,8 +78,11 @@ class FakeBackend:
         return ProcessRef("ios", "P2", device=device, name="Launched", package=app, pid=99)
 
 
-def _fake(monkeypatch, *, stable_path: Path | None = None):
-    backend = FakeBackend(stable_path=stable_path or Path("/tmp/tracecite-mobile-stable.log"))
+def _fake(monkeypatch, *, stable_path: Path | None = None, live_path: Path | None = None):
+    backend = FakeBackend(
+        stable_path=stable_path or Path("/tmp/tracecite-mobile-stable.log"),
+        live_path=live_path or Path("/tmp/live.log"),
+    )
     monkeypatch.setattr(caps, "get_backend", lambda platform: backend)
     return backend
 
@@ -131,6 +135,56 @@ def test_session_actions_require_explicit_device_in_executor(monkeypatch, tmp_pa
     assert ("stop_sessions", ["D1"], False, str(tmp_path)) in backend.calls
 
 
+def test_cut_session_returns_stable_handoff_and_collection_continues(monkeypatch, tmp_path) -> None:
+    live_path = tmp_path / "live.log"
+    sealed_path = tmp_path / ".archive" / "Phone" / "sealed.log"
+    backend = _fake(monkeypatch, live_path=live_path)
+
+    class FakeSeal:
+        def to_dict(self):
+            return {
+                "sealed_path": str(sealed_path),
+                "hot_path": str(live_path),
+                "start": "2026-09-03T11:00:00",
+                "end": "2026-09-03T11:01:00",
+                "bytes": 128,
+                "lines": 3,
+                "segment": {"path": str(sealed_path)},
+            }
+
+    seen = {}
+
+    def fake_seal(path, *, device_name):
+        seen["path"] = path
+        seen["device_name"] = device_name
+        return FakeSeal()
+
+    monkeypatch.setattr(caps, "request_seal_hot", fake_seal)
+
+    cut = caps.cut_log_session({
+        "platform": "ios",
+        "device": "D1",
+        "output_dir": str(tmp_path),
+    })
+
+    assert seen == {"path": live_path, "device_name": "Phone"}
+    assert cut["state"] == "running"
+    assert cut["collection_continues"] is True
+    assert cut["evidence_files"] == [str(sealed_path)]
+    assert cut["artifacts"] == [
+        {
+            "kind": "device_log",
+            "path": str(sealed_path),
+            "stable": True,
+            "sealed": True,
+            "platform": "ios",
+            "session_id": "S1",
+            "device_id": "D1",
+        }
+    ]
+    assert backend.calls.count(("list_sessions", ["D1"], str(tmp_path))) == 2
+
+
 def test_stopped_missing_file_is_not_advertised_as_stable(monkeypatch, tmp_path) -> None:
     missing = tmp_path / "missing.log"
     _fake(monkeypatch, stable_path=missing)
@@ -146,12 +200,14 @@ def test_stopped_missing_file_is_not_advertised_as_stable(monkeypatch, tmp_path)
     assert "evidence_files" not in stopped
 
 
-def test_live_session_views_do_not_claim_stable_artifacts(monkeypatch) -> None:
+def test_live_session_views_advertise_cut_without_claiming_stability(monkeypatch) -> None:
     _fake(monkeypatch)
 
     listed = caps.list_log_sessions({"platform": "ios"})
 
     assert listed["state"] == "running"
+    assert listed["supports_cut"] is True
+    assert listed["sessions"][0]["supports_cut"] is True
     assert "artifacts" not in listed
     assert "evidence_files" not in listed
 
@@ -174,6 +230,7 @@ def test_agent_capability_contract_exposes_scope_and_authorization() -> None:
         "mobile.processes.list",
         "mobile.sessions.list",
         "mobile.sessions.start",
+        "mobile.sessions.cut",
         "mobile.sessions.stop",
         "mobile.app.launch",
     }
@@ -190,13 +247,16 @@ def test_agent_capability_contract_exposes_scope_and_authorization() -> None:
     assert "scoped" in specs["mobile.devices.list"].description.lower()
     assert "root-cause" in specs["mobile.processes.list"].description.lower()
     assert "sufficiency" in specs["mobile.sessions.list"].description.lower()
+    assert "supports_cut=true" in specs["mobile.sessions.list"].description
 
-    for name in ("mobile.sessions.start", "mobile.sessions.stop", "mobile.app.launch"):
+    for name in ("mobile.sessions.start", "mobile.sessions.cut", "mobile.sessions.stop", "mobile.app.launch"):
         assert specs[name].kind == "action"
         assert specs[name].safety == "live_action"
         assert specs[name].requires_authorization is True
         assert "authorized live action" in specs[name].description.lower()
 
+    assert "collection session continues" in specs["mobile.sessions.cut"].description
+    assert "artifacts/evidence_files" in specs["mobile.sessions.cut"].description
     assert "artifacts/evidence_files" in specs["mobile.sessions.stop"].description
 
     device_schema = specs["mobile.processes.list"].input_schema["properties"]["device"]
